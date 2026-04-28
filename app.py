@@ -1,6 +1,7 @@
 import re
 import json
 import uuid
+import os
 import requests as http_requests
 from typing import Optional
 from urllib.parse import urlparse
@@ -11,8 +12,11 @@ import chromadb
 app = Flask(__name__)
 app.secret_key = "generative-browser-secret"
 
-MODEL      = "qwen3:1.7b"
+# ── Model config ───────────────────────────────────────
+MODEL       = "qwen3:1.7b"
 EMBED_MODEL = "embeddinggemma:latest"
+
+print(f"[config] Ollama — model: {MODEL}")
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -20,6 +24,12 @@ chroma_client = chromadb.PersistentClient(path="./chroma_db")
 def get_collection():
     return chroma_client.get_or_create_collection(
         name="site_knowledge",
+        metadata={"hnsw:space": "cosine"}
+    )
+
+def get_trend_collection():
+    return chroma_client.get_or_create_collection(
+        name="design_trends",
         metadata={"hnsw:space": "cosine"}
     )
 
@@ -82,6 +92,76 @@ EXPERIENCE_LEVELS = {
     "basics":   "The reader knows the basics — skip introductions, explain advanced concepts.",
     "expert":   "The reader is an expert — use technical terminology, skip all basics.",
 }
+# ── Design trends (developer-controlled RAG knowledge) ─
+DESIGN_TREND_DOCS = [
+    ("trend_modern",
+     "Modern design trend: clean professional aesthetic with subtle shadows and rounded corners. "
+     "Best for professional, formal, structured users who prefer detailed or bullet-point content at intermediate or expert level. "
+     "CSS style: ample white space, subtle box-shadows, rounded corners, sans-serif font, polished two-tone color scheme."),
+    ("trend_glassmorphism",
+     "Glassmorphism design trend: frosted glass effect with blur and transparency. "
+     "Best for casual or playful users who enjoy detailed or story-driven content. Creative and visual audiences. "
+     "CSS style: backdrop-filter blur, semi-transparent rgba backgrounds, soft glowing borders, layered depth on gradient background."),
+    ("trend_brutalism",
+     "Brutalism design trend: bold raw aesthetic with thick borders and high contrast. "
+     "Best for expert, dry, factual users who prefer short and direct content. Tech-savvy or artistic audiences. "
+     "CSS style: thick black borders, raw bold typography, high-contrast colors, asymmetric layouts, no rounded corners."),
+    ("trend_neumorphism",
+     "Neumorphism design trend: soft tactile UI with extruded elements. "
+     "Best for professional users who prefer detailed structured content at intermediate level. "
+     "CSS style: dual inset/outset box-shadows on monochromatic background, tactile raised buttons."),
+    ("trend_cyberpunk",
+     "Cyberpunk design trend: dark neon aesthetic with glowing effects. "
+     "Best for playful, fun, casual users who enjoy storytelling and beginner-friendly content. Gaming and creative audiences. "
+     "CSS style: pure black background, neon accent colors hot pink #ff2d78 and cyan #00fff7, glowing text-shadow, monospace font."),
+    ("trend_minimalism",
+     "Minimalism design trend: extreme simplicity with maximum whitespace. "
+     "Best for expert users who prefer dry, short, factual and no-nonsense content. Professional or academic audiences. "
+     "CSS style: white background, single accent color, generous whitespace, thin typography, zero decorative elements."),
+    ("trend_retro",
+     "Retro Y2K design trend: vibrant nostalgic aesthetic with bright colors and bubbly shapes. "
+     "Best for beginner or casual users who enjoy playful and story-driven content. Fun and nostalgic audiences. "
+     "CSS style: bright bubbly gradients, pixel-style fonts, vivid colors, decorative dividers, 2000s web nostalgia."),
+    ("trend_bento",
+     "Bento Grid design trend: modular card-based layout inspired by Japanese bento boxes. "
+     "Best for users who prefer bullet points, structured scannable content, casual or professional tone at basics level. "
+     "CSS style: CSS grid with mixed card sizes, clean section blocks, subtle color fills, organized modular structure."),
+]
+
+def seed_design_trends():
+    """Seed design trend documents into ChromaDB at startup."""
+    col = get_trend_collection()
+    existing = set(col.get()["ids"]) if col.count() > 0 else set()
+    added = 0
+    for doc_id, text in DESIGN_TREND_DOCS:
+        if doc_id in existing:
+            continue
+        emb = embed(text)
+        if not emb:
+            continue
+        col.add(ids=[doc_id], embeddings=[emb], documents=[text], metadatas=[{"source": "design-trends"}])
+        added += 1
+    if added:
+        print(f"[rag] seeded {added} design trend(s)")
+    else:
+        print("[rag] design trends already seeded")
+
+def retrieve_design_trend(profile: dict) -> str:
+    """Pick the best design trend for this user profile via RAG."""
+    query = (
+        f"{profile.get('tone', 'casual')} "
+        f"{profile.get('reading_style', 'detailed')} "
+        f"{profile.get('experience', 'basics')}"
+    )
+    col = get_trend_collection()
+    if col.count() == 0:
+        return ""
+    emb = embed(query)
+    if not emb:
+        return ""
+    results = col.query(query_embeddings=[emb], n_results=1)
+    docs = results["documents"][0]
+    return docs[0] if docs else ""
 
 def default_profile():
     return {"reading_style": "detailed", "tone": "casual", "experience": "basics"}
@@ -106,7 +186,7 @@ def parse_url(raw: str):
 # ── Prompt builder (4T's structure) ───────────────────
 def build_messages(url: str, domain: str, path: str,
                    context: Optional[str], profile: dict,
-                   rag_context: str = "") -> list:
+                   rag_context: str = "", design_trend: str = "") -> list:
     """
     Prompt is structured around the 4T's framework:
 
@@ -152,7 +232,10 @@ def build_messages(url: str, domain: str, path: str,
         "rich main content relevant to the domain, and a footer. "
         "Use inline <style> with a cohesive modern color scheme. "
         "Add at least 5 internal <a href='/path'> links. "
-        "Placeholder images: https://picsum.photos/800/400?random=1"
+        "For ALL images use Pollinations.ai — format exactly like this: "
+        "<img src='https://image.pollinations.ai/prompt/fresh+red+roses+in+a+flower+shop?width=800&height=400' alt='...'> "
+        "Replace spaces with + in the prompt. Make each description specific and relevant to the page. "
+        "Never use picsum.photos or any other image source."
     )
 
     # ── TONE ──────────────────────────────────────────
@@ -161,11 +244,15 @@ def build_messages(url: str, domain: str, path: str,
     # ── TARGET ────────────────────────────────────────
     target = ts["target"]
 
+    # ── DESIGN ────────────────────────────────────────
+    design_block = design_trend if design_trend else "Clean modern design with ample white space and a professional color scheme."
+
     # ── Assemble system prompt with explicit 4T labels ─
     system = (
         f"[TRAITS]\n{traits}\n\n"
         f"[TONE]\n{tone}\n\n"
-        f"[TARGET]\n{target}"
+        f"[TARGET]\n{target}\n\n"
+        f"[DESIGN]\n{design_block}"
     )
 
     user = f"/no_think\n[TASK]\n{task}\n\nStart with <!DOCTYPE html> now:"
@@ -183,6 +270,10 @@ def build_messages(url: str, domain: str, path: str,
 def index():
     return render_template("index.html")
 
+@app.route("/admin")
+def admin():
+    return render_template("admin.html")
+
 # ── Profile ────────────────────────────────────────────
 @app.route("/api/profile", methods=["GET"])
 def get_profile():
@@ -192,8 +283,8 @@ def get_profile():
 def set_profile():
     data = request.get_json(force=True)
     profile = {
-        "reading_style": data.get("reading_style") if data.get("reading_style") in READING_STYLES else "detailed",
-        "tone":          data.get("tone")           if data.get("tone")           in TONES           else "casual",
+        "reading_style": data.get("reading_style") if data.get("reading_style") in READING_STYLES    else "detailed",
+        "tone":          data.get("tone")           if data.get("tone")           in TONES            else "casual",
         "experience":    data.get("experience")     if data.get("experience")     in EXPERIENCE_LEVELS else "basics",
     }
     session["profile"] = profile
@@ -278,11 +369,16 @@ def generate():
     rag_query   = f"{domain} {path.replace('/', ' ').replace('-', ' ')}"
     rag_context = retrieve(rag_query)
 
-    messages = build_messages(full_url, domain, path, context, profile, rag_context)
+    # Design trend — chosen automatically via RAG based on user profile
+    design_trend = retrieve_design_trend(profile)
+
+    messages = build_messages(full_url, domain, path, context, profile, rag_context, design_trend)
 
     debug_prompt = (
-        f"── RAG: RETRIEVED CONTEXT ──────────────────\n"
+        f"── RAG: RETRIEVED CONTENT ──────────────────\n"
         f"{rag_context or '(ingen dokumenter i vidensbasen)'}\n\n"
+        f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
+        f"{design_trend or '(ingen trend fundet)'}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
         f"{messages[0]['content']}\n\n"
         f"── 4T USER PROMPT (TASK) ───────────────────\n"
@@ -310,7 +406,6 @@ def stream_page(sid: str):
 
         try:
             stream = ollama.chat(model=MODEL, messages=messages, stream=True)
-
             for chunk in stream:
                 raw = chunk["message"]["content"]
                 if not raw:
@@ -378,6 +473,7 @@ def stream_page(sid: str):
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         except Exception as exc:
+            print(f"[stream error] {exc}")
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 
     return Response(
@@ -387,4 +483,5 @@ def stream_page(sid: str):
     )
 
 if __name__ == "__main__":
+    seed_design_trends()
     app.run(debug=True, threaded=True, port=5000)
