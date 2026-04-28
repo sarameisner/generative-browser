@@ -470,6 +470,22 @@ def stream_page(sid: str):
                 f"CSS (excerpt):\n{style_excerpt[:600]}"
             )
 
+            # Inject image-repair script — fixes any broken img src using alt text via Pollinations
+            img_fix = (
+                "<script>"
+                "document.querySelectorAll('img').forEach(function(img){"
+                "  function fix(){"
+                "    var desc=(img.alt||'website image').trim().replace(/\\s+/g,'+');"
+                "    img.src='https://image.pollinations.ai/prompt/'+desc+'?width=800&height=400';"
+                "    img.onerror=null;"
+                "  }"
+                "  img.onerror=fix;"
+                "  if(img.complete&&img.naturalWidth===0) fix();"
+                "});"
+                "</script>"
+            )
+            yield f"data: {json.dumps({'chunk': img_fix})}\n\n"
+
             yield f"data: {json.dumps({'done': True})}\n\n"
 
         except Exception as exc:
