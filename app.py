@@ -2,15 +2,101 @@ import re
 import json
 import uuid
 import os
+import io
 import requests as http_requests
 from typing import Optional
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context, session
 import ollama
 import chromadb
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2 import service_account
 
 app = Flask(__name__)
 app.secret_key = "generative-browser-secret"
+
+# ── Google Drive config ────────────────────────────────
+DRIVE_FOLDER_ID   = "1qcvx55UkGe3y92f2tLN3S0UTWOm3KHbz"
+CREDENTIALS_FILE  = os.path.join(os.path.dirname(__file__), "credentials.json")
+DRIVE_SCOPES      = ["https://www.googleapis.com/auth/drive.readonly"]
+
+def get_drive_service():
+    creds = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE, scopes=DRIVE_SCOPES
+    )
+    return build("drive", "v3", credentials=creds)
+
+def sync_from_drive() -> dict:
+    """Download all .txt and .pdf files from the shared Drive folder and ingest into RAG."""
+    service = get_drive_service()
+    col     = get_collection()
+
+    # List files in folder
+    results = service.files().list(
+        q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+        fields="files(id, name, mimeType)"
+    ).execute()
+    files = results.get("files", [])
+
+    added_total = 0
+    synced = []
+    for f in files:
+        name     = f["name"]
+        mime     = f["mimeType"]
+        file_id  = f["id"]
+
+        # Download file content
+        try:
+            if mime == "application/pdf":
+                request_dl = service.files().get_media(fileId=file_id)
+                buf = io.BytesIO()
+                downloader = MediaIoBaseDownload(buf, request_dl)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                buf.seek(0)
+                import pypdf
+                reader  = pypdf.PdfReader(buf)
+                content = "\n".join(p.extract_text() for p in reader.pages if p.extract_text())
+            else:
+                request_dl = service.files().get_media(fileId=file_id)
+                buf = io.BytesIO()
+                downloader = MediaIoBaseDownload(buf, request_dl)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                content = buf.getvalue().decode("utf-8", errors="ignore")
+        except Exception as e:
+            print(f"[drive] skipping {name}: {e}")
+            continue
+
+        if not content.strip():
+            continue
+
+        # Remove old chunks for this source, then re-add
+        existing = col.get(where={"source": name})
+        if existing["ids"]:
+            col.delete(ids=existing["ids"])
+
+        chunks = chunk_text(content)
+        added  = 0
+        for i, chunk in enumerate(chunks):
+            emb = embed(chunk)
+            if not emb:
+                continue
+            col.add(
+                ids=[f"{name}_{i}_{uuid.uuid4().hex[:6]}"],
+                embeddings=[emb],
+                documents=[chunk],
+                metadatas=[{"source": name}],
+            )
+            added += 1
+        added_total += added
+        synced.append({"file": name, "chunks": added})
+        print(f"[drive] synced '{name}' → {added} chunks")
+
+    return {"ok": True, "files_synced": len(synced), "chunks_added": added_total, "details": synced}
 
 # ── Model config ───────────────────────────────────────
 MODEL       = "qwen3:1.7b"
@@ -27,11 +113,6 @@ def get_collection():
         metadata={"hnsw:space": "cosine"}
     )
 
-def get_trend_collection():
-    return chroma_client.get_or_create_collection(
-        name="design_trends",
-        metadata={"hnsw:space": "cosine"}
-    )
 
 # ── Embedding via Ollama ───────────────────────────────
 def embed(text: str) -> list:
@@ -92,76 +173,22 @@ EXPERIENCE_LEVELS = {
     "basics":   "The reader knows the basics — skip introductions, explain advanced concepts.",
     "expert":   "The reader is an expert — use technical terminology, skip all basics.",
 }
-# ── Design trends (developer-controlled RAG knowledge) ─
-DESIGN_TREND_DOCS = [
-    ("trend_modern",
-     "Modern design trend: clean professional aesthetic with subtle shadows and rounded corners. "
-     "Best for professional, formal, structured users who prefer detailed or bullet-point content at intermediate or expert level. "
-     "CSS style: ample white space, subtle box-shadows, rounded corners, sans-serif font, polished two-tone color scheme."),
-    ("trend_glassmorphism",
-     "Glassmorphism design trend: frosted glass effect with blur and transparency. "
-     "Best for casual or playful users who enjoy detailed or story-driven content. Creative and visual audiences. "
-     "CSS style: backdrop-filter blur, semi-transparent rgba backgrounds, soft glowing borders, layered depth on gradient background."),
-    ("trend_brutalism",
-     "Brutalism design trend: bold raw aesthetic with thick borders and high contrast. "
-     "Best for expert, dry, factual users who prefer short and direct content. Tech-savvy or artistic audiences. "
-     "CSS style: thick black borders, raw bold typography, high-contrast colors, asymmetric layouts, no rounded corners."),
-    ("trend_neumorphism",
-     "Neumorphism design trend: soft tactile UI with extruded elements. "
-     "Best for professional users who prefer detailed structured content at intermediate level. "
-     "CSS style: dual inset/outset box-shadows on monochromatic background, tactile raised buttons."),
-    ("trend_cyberpunk",
-     "Cyberpunk design trend: dark neon aesthetic with glowing effects. "
-     "Best for playful, fun, casual users who enjoy storytelling and beginner-friendly content. Gaming and creative audiences. "
-     "CSS style: pure black background, neon accent colors hot pink #ff2d78 and cyan #00fff7, glowing text-shadow, monospace font."),
-    ("trend_minimalism",
-     "Minimalism design trend: extreme simplicity with maximum whitespace. "
-     "Best for expert users who prefer dry, short, factual and no-nonsense content. Professional or academic audiences. "
-     "CSS style: white background, single accent color, generous whitespace, thin typography, zero decorative elements."),
-    ("trend_retro",
-     "Retro Y2K design trend: vibrant nostalgic aesthetic with bright colors and bubbly shapes. "
-     "Best for beginner or casual users who enjoy playful and story-driven content. Fun and nostalgic audiences. "
-     "CSS style: bright bubbly gradients, pixel-style fonts, vivid colors, decorative dividers, 2000s web nostalgia."),
-    ("trend_bento",
-     "Bento Grid design trend: modular card-based layout inspired by Japanese bento boxes. "
-     "Best for users who prefer bullet points, structured scannable content, casual or professional tone at basics level. "
-     "CSS style: CSS grid with mixed card sizes, clean section blocks, subtle color fills, organized modular structure."),
-]
-
-def seed_design_trends():
-    """Seed design trend documents into ChromaDB at startup."""
-    col = get_trend_collection()
-    existing = set(col.get()["ids"]) if col.count() > 0 else set()
-    added = 0
-    for doc_id, text in DESIGN_TREND_DOCS:
-        if doc_id in existing:
-            continue
-        emb = embed(text)
-        if not emb:
-            continue
-        col.add(ids=[doc_id], embeddings=[emb], documents=[text], metadatas=[{"source": "design-trends"}])
-        added += 1
-    if added:
-        print(f"[rag] seeded {added} design trend(s)")
-    else:
-        print("[rag] design trends already seeded")
-
 def retrieve_design_trend(profile: dict) -> str:
-    """Pick the best design trend for this user profile via RAG."""
+    """Pick the best design trend from the Drive knowledge base based on user profile."""
     query = (
-        f"{profile.get('tone', 'casual')} "
+        f"design trend for {profile.get('tone', 'casual')} "
         f"{profile.get('reading_style', 'detailed')} "
-        f"{profile.get('experience', 'basics')}"
+        f"{profile.get('experience', 'basics')} user"
     )
-    col = get_trend_collection()
+    col = get_collection()
     if col.count() == 0:
         return ""
     emb = embed(query)
     if not emb:
         return ""
-    results = col.query(query_embeddings=[emb], n_results=1)
+    results = col.query(query_embeddings=[emb], n_results=2)
     docs = results["documents"][0]
-    return docs[0] if docs else ""
+    return "\n".join(docs) if docs else ""
 
 def default_profile():
     return {"reading_style": "detailed", "tone": "casual", "experience": "basics"}
@@ -350,6 +377,14 @@ def rag_clear():
     chroma_client.delete_collection("site_knowledge")
     return jsonify({"ok": True})
 
+@app.route("/rag/sync-drive", methods=["POST"])
+def rag_sync_drive():
+    try:
+        result = sync_from_drive()
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ── Page generation ────────────────────────────────────
 @app.route("/generate", methods=["POST"])
 def generate():
@@ -480,5 +515,4 @@ def stream_page(sid: str):
     )
 
 if __name__ == "__main__":
-    seed_design_trends()
     app.run(debug=True, threaded=True, port=5000)

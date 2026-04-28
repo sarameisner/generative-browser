@@ -169,46 +169,23 @@
 
   <div class="grid">
 
-    <!-- ── Upload fil ── -->
-    <div class="card">
-      <h2>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-        Upload fil
-      </h2>
-
-      <div id="drop-zone">
-        <input type="file" id="file-input" accept=".txt,.pdf,.md">
-        <p><strong>Klik for at vælge fil</strong><br>eller træk den hertil</p>
-        <p style="margin-top:6px;font-size:11px">.txt &nbsp;·&nbsp; .pdf &nbsp;·&nbsp; .md</p>
-      </div>
-      <div id="file-name"></div>
-
-      <div class="btn-row">
-        <button class="btn btn-primary" id="upload-btn" disabled>Upload til vidensbase</button>
-      </div>
+    <!-- ── Sync fra Google Drive ── -->
+  <div class="card full-card" style="border-color:#a6e3a1">
+    <h2>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+      </svg>
+      Sync fra Google Drive
+    </h2>
+    <p style="font-size:12px;color:#6c7086;margin-bottom:14px">
+      Henter alle filer fra den delte Drive-mappe og injecter dem i vidensbasen. Eksisterende indhold fra samme fil overskrives.
+    </p>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="sync-drive-btn">Sync fra Google Drive</button>
+      <span id="sync-status" style="font-size:12px;color:#6c7086"></span>
     </div>
-
-    <!-- ── Indsæt tekst ── -->
-    <div class="card">
-      <h2>
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-        </svg>
-        Indsæt tekst
-      </h2>
-
-      <label for="text-source">Kilde-navn</label>
-      <input type="text" id="text-source" placeholder="f.eks. luna-blomster eller produktkatalog" style="margin-bottom:12px">
-
-      <label for="text-content">Indhold</label>
-      <textarea id="text-content" placeholder="Indsæt tekst der skal tilføjes til vidensbasen..."></textarea>
-
-      <div class="btn-row">
-        <button class="btn btn-primary" id="add-text-btn">Tilføj til vidensbase</button>
-      </div>
-    </div>
+  </div>
 
     <!-- ── Vidensbase status ── -->
     <div class="card">
@@ -245,20 +222,13 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/>
         </svg>
-        Design trends (auto-RAG)
+        Design trends (via Google Drive)
       </h2>
       <p style="font-size:12px;color:#6c7086;margin-bottom:14px">
-        Seedes automatisk ved opstart. Matches mod brugerprofil via RAG.
+        Designtrends hentes fra PDF-filen i Google Drive. Sync drevet for at opdatere. Matches automatisk mod brugerprofil via RAG ved sidegenerering.
       </p>
-      <div class="trend-grid" id="trend-grid">
-        <div class="trend-item"><strong>Modern</strong><span>Professional · Detailed · Expert</span></div>
-        <div class="trend-item"><strong>Glassmorphism</strong><span>Casual · Story · Creative</span></div>
-        <div class="trend-item"><strong>Brutalism</strong><span>Dry · Short · Expert</span></div>
-        <div class="trend-item"><strong>Neumorphism</strong><span>Professional · Detailed · Basics</span></div>
-        <div class="trend-item"><strong>Cyberpunk</strong><span>Playful · Story · Beginner</span></div>
-        <div class="trend-item"><strong>Minimalism</strong><span>Dry · Short · Expert</span></div>
-        <div class="trend-item"><strong>Retro Y2K</strong><span>Playful · Story · Beginner</span></div>
-        <div class="trend-item"><strong>Bento Grid</strong><span>Casual · Bullets · Basics</span></div>
+      <div style="background:#1e1e2e;border:1px solid #313244;border-radius:6px;padding:12px;font-size:12px;color:#6c7086">
+        Synkroniser drevet for at indlæse designtrend-viden fra jeres PDF-fil.
       </div>
     </div>
 
@@ -276,79 +246,6 @@
     clearTimeout(toast._t);
     toast._t = setTimeout(() => toast.className = '', 3000);
   }
-
-  // ── File upload ──────────────────────────────────────
-  const dropZone  = document.getElementById('drop-zone');
-  const fileInput = document.getElementById('file-input');
-  const fileName  = document.getElementById('file-name');
-  const uploadBtn = document.getElementById('upload-btn');
-  let selectedFile = null;
-
-  dropZone.addEventListener('click', () => fileInput.click());
-  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
-  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-  dropZone.addEventListener('drop', e => {
-    e.preventDefault();
-    dropZone.classList.remove('drag-over');
-    const f = e.dataTransfer.files[0];
-    if (f) selectFile(f);
-  });
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files[0]) selectFile(fileInput.files[0]);
-  });
-
-  function selectFile(f) {
-    selectedFile = f;
-    fileName.textContent = f.name;
-    uploadBtn.disabled = false;
-  }
-
-  uploadBtn.addEventListener('click', async () => {
-    if (!selectedFile) return;
-    uploadBtn.disabled = true;
-    uploadBtn.textContent = 'Uploader...';
-    const fd = new FormData();
-    fd.append('file', selectedFile);
-    try {
-      const res  = await fetch('/rag/upload', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (data.ok) {
-        showToast(`Tilføjet: ${data.chunks_added} chunks fra "${data.source}"`);
-        selectedFile = null; fileName.textContent = ''; fileInput.value = '';
-        loadStatus();
-      } else {
-        showToast(data.error || 'Fejl', 'err');
-      }
-    } catch(e) { showToast('Netvaerksfejl', 'err'); }
-    uploadBtn.textContent = 'Upload til vidensbase';
-    uploadBtn.disabled = true;
-  });
-
-  // ── Text paste ───────────────────────────────────────
-  document.getElementById('add-text-btn').addEventListener('click', async () => {
-    const source  = document.getElementById('text-source').value.trim() || 'manual';
-    const content = document.getElementById('text-content').value.trim();
-    if (!content) { showToast('Indsæt noget tekst først', 'err'); return; }
-    const btn = document.getElementById('add-text-btn');
-    btn.disabled = true; btn.textContent = 'Tilføjer...';
-    try {
-      const res  = await fetch('/rag/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content, source }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        showToast(`Tilføjet: ${data.chunks_added} chunks fra "${data.source}"`);
-        document.getElementById('text-content').value = '';
-        document.getElementById('text-source').value = '';
-        loadStatus();
-      } else {
-        showToast(data.error || 'Fejl', 'err');
-      }
-    } catch(e) { showToast('Netvaerksfejl', 'err'); }
-    btn.disabled = false; btn.textContent = 'Tilføj til vidensbase';
-  });
 
   // ── Status & sources ─────────────────────────────────
   async function loadStatus() {
@@ -385,6 +282,32 @@
   });
 
   document.getElementById('refresh-btn').addEventListener('click', loadStatus);
+
+  // ── Sync fra Drive ───────────────────────────────────
+  document.getElementById('sync-drive-btn').addEventListener('click', async () => {
+    const btn    = document.getElementById('sync-drive-btn');
+    const status = document.getElementById('sync-status');
+    btn.disabled = true;
+    btn.textContent = 'Synkroniserer...';
+    status.textContent = 'Henter filer fra Drive...';
+    try {
+      const res  = await fetch('/rag/sync-drive', { method: 'POST' });
+      const data = await res.json();
+      if (data.ok) {
+        status.textContent = `${data.files_synced} fil(er) synkroniseret — ${data.chunks_added} chunks tilføjet`;
+        showToast(`Drive sync fuldfort: ${data.files_synced} filer`);
+        loadStatus();
+      } else {
+        status.textContent = 'Fejl: ' + (data.error || 'ukendt');
+        showToast(data.error || 'Fejl', 'err');
+      }
+    } catch(e) {
+      status.textContent = 'Netvaerksfejl';
+      showToast('Netvaerksfejl', 'err');
+    }
+    btn.disabled = false;
+    btn.textContent = 'Sync fra Google Drive';
+  });
 
   // ── Init ─────────────────────────────────────────────
   loadStatus();
