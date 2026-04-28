@@ -232,10 +232,7 @@ def build_messages(url: str, domain: str, path: str,
         "rich main content relevant to the domain, and a footer. "
         "Use inline <style> with a cohesive modern color scheme. "
         "Add at least 5 internal <a href='/path'> links. "
-        "For ALL images use Pollinations.ai — format exactly like this: "
-        "<img src='https://image.pollinations.ai/prompt/fresh+red+roses+in+a+flower+shop?width=800&height=400' alt='...'> "
-        "Replace spaces with + in the prompt. Make each description specific and relevant to the page. "
-        "Never use picsum.photos or any other image source."
+        "Placeholder images: https://picsum.photos/800/400?random=1 (increment the number for each image)."
     )
 
     # ── TONE ──────────────────────────────────────────
@@ -469,22 +466,6 @@ def stream_page(sid: str):
                 f"Color palette: {', '.join(colors)}\n"
                 f"CSS (excerpt):\n{style_excerpt[:600]}"
             )
-
-            # Inject image-repair script — fixes any broken img src using alt text via Pollinations
-            img_fix = (
-                "<script>"
-                "document.querySelectorAll('img').forEach(function(img){"
-                "  function fix(){"
-                "    var desc=(img.alt||'website image').trim().replace(/\\s+/g,'+');"
-                "    img.src='https://image.pollinations.ai/prompt/'+desc+'?width=800&height=400';"
-                "    img.onerror=null;"
-                "  }"
-                "  img.onerror=fix;"
-                "  if(img.complete&&img.naturalWidth===0) fix();"
-                "});"
-                "</script>"
-            )
-            yield f"data: {json.dumps({'chunk': img_fix})}\n\n"
 
             yield f"data: {json.dumps({'done': True})}\n\n"
 
