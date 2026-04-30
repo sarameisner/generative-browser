@@ -213,8 +213,8 @@
     #rag-chunk-count { color: #a6e3a1; font-family: "SF Mono", monospace; }
     #rag-chunk-count.empty { color: #6c7086; }
 
-    #rag-sources-list { font-size: 12px; color: #6c7086; }
-    #rag-sources-list span {
+    #rag-sources-list, #rag-folder-files { font-size: 12px; color: #6c7086; }
+    #rag-sources-list span, #rag-folder-files span {
       display: inline-block; background: #313244; border: 1px solid #45475a;
       border-radius: 5px; padding: 2px 8px; margin: 3px 3px 0 0;
       font-family: "SF Mono", monospace; font-size: 11px; color: #89b4fa;
@@ -292,27 +292,16 @@
   <div id="rag-card">
     <div>
       <h2>Vidensbase (RAG)</h2>
-      <p>Upload dokumenter — de hentes automatisk når du genererer sider med relateret indhold.</p>
+      <p>Placer `.txt`/`.pdf` filer i `knowledge_base/` mappen og kør ingest for at opdatere vidensbasen.</p>
     </div>
 
-    <!-- Upload fil -->
     <div>
-      <div class="rag-section-title">Upload dokument</div>
-      <div id="rag-drop-zone">
-        Klik for at uploade .txt eller .pdf fil
-        <input type="file" id="rag-file-input" accept=".txt,.pdf,.md" />
-      </div>
-    </div>
-
-    <!-- Eller indsæt tekst -->
-    <div>
-      <div class="rag-section-title">Eller indsæt tekst direkte</div>
-      <textarea id="rag-text-input" placeholder="Indsæt tekst her — f.eks. produktinfo, om-siden, FAQ..."></textarea>
-      <input type="text" id="rag-source-input" placeholder="Kildenavn (f.eks. blomsterbutik-info.txt)" />
+      <div class="rag-section-title">Knowledge folder</div>
+      <div id="rag-drop-zone">`knowledge_base/` (lokal mappe i projektet)</div>
     </div>
 
     <div class="rag-row">
-      <button class="rag-btn primary" id="rag-add-text-btn">Tilføj til vidensbase</button>
+      <button class="rag-btn primary" id="rag-ingest-btn">Kør ingest fra mappe</button>
       <span id="rag-message"></span>
     </div>
 
@@ -328,6 +317,10 @@
     <div id="rag-sources-wrap" style="display:none">
       <div class="rag-section-title">Indlæste kilder</div>
       <div id="rag-sources-list"></div>
+    </div>
+    <div id="rag-folder-files-wrap" style="display:none">
+      <div class="rag-section-title">Filer fundet i `knowledge_base/`</div>
+      <div id="rag-folder-files"></div>
     </div>
 
     <div class="rag-row" style="justify-content:flex-end">
@@ -811,16 +804,14 @@ window.addEventListener('message', e => {
 const ragOverlay    = document.getElementById('rag-overlay');
 const ragBtn        = document.getElementById('rag-btn');
 const ragCloseBtn   = document.getElementById('rag-close-btn');
-const ragDropZone   = document.getElementById('rag-drop-zone');
-const ragFileInput  = document.getElementById('rag-file-input');
-const ragTextInput  = document.getElementById('rag-text-input');
-const ragSourceInput= document.getElementById('rag-source-input');
-const ragAddTextBtn = document.getElementById('rag-add-text-btn');
+const ragIngestBtn  = document.getElementById('rag-ingest-btn');
 const ragClearBtn   = document.getElementById('rag-clear-btn');
 const ragChunkCount = document.getElementById('rag-chunk-count');
 const ragMessage    = document.getElementById('rag-message');
 const ragSourcesList= document.getElementById('rag-sources-list');
 const ragSourcesWrap= document.getElementById('rag-sources-wrap');
+const ragFolderFilesWrap = document.getElementById('rag-folder-files-wrap');
+const ragFolderFiles = document.getElementById('rag-folder-files');
 const ragIndicator  = document.getElementById('rag-indicator');
 
 function setRagMessage(msg, type='ok') {
@@ -836,6 +827,9 @@ async function refreshRagStatus() {
   ragChunkCount.textContent = n === 0 ? 'tom' : `${n} chunks`;
   ragChunkCount.className   = n === 0 ? 'empty' : '';
   ragIndicator.classList.toggle('active', n > 0);
+  const folderFiles = data.files_available || [];
+  ragFolderFilesWrap.style.display = folderFiles.length ? 'block' : 'none';
+  ragFolderFiles.innerHTML = folderFiles.map(s => `<span>${s}</span>`).join('');
 
   const r2     = await fetch('/rag/list');
   const data2  = await r2.json();
@@ -844,11 +838,11 @@ async function refreshRagStatus() {
   ragSourcesList.innerHTML = sources.map(s => `<span>${s}</span>`).join('');
 }
 
-async function uploadToRag(formData) {
-  const r    = await fetch('/rag/upload', { method: 'POST', body: formData });
+async function ingestRagFolder() {
+  const r    = await fetch('/rag/ingest', { method: 'POST' });
   const data = await r.json();
   if (data.error) { setRagMessage(data.error, 'error'); return; }
-  setRagMessage(`${data.chunks_added} chunks tilføjet fra "${data.source}"`, 'ok');
+  setRagMessage(`${data.chunks_added} chunks fra ${data.files_ingested}/${data.files_scanned} filer`, 'ok');
   await refreshRagStatus();
 }
 
@@ -858,33 +852,9 @@ ragBtn.addEventListener('click', () => {
 });
 ragCloseBtn.addEventListener('click', () => ragOverlay.classList.add('hidden'));
 
-ragDropZone.addEventListener('click', () => ragFileInput.click());
-ragFileInput.addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  setRagMessage('Uploader og indlejrer…', 'ok');
-  const fd = new FormData();
-  fd.append('file', file);
-  await uploadToRag(fd);
-  ragFileInput.value = '';
-});
-
-ragAddTextBtn.addEventListener('click', async () => {
-  const text   = ragTextInput.value.trim();
-  const source = ragSourceInput.value.trim() || 'manual';
-  if (!text) { setRagMessage('Ingen tekst at tilføje', 'error'); return; }
-  setRagMessage('Indlejrer tekst…', 'ok');
-  const r    = await fetch('/rag/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, source }),
-  });
-  const data = await r.json();
-  if (data.error) { setRagMessage(data.error, 'error'); return; }
-  setRagMessage(`${data.chunks_added} chunks tilføjet fra "${data.source}"`, 'ok');
-  ragTextInput.value  = '';
-  ragSourceInput.value= '';
-  await refreshRagStatus();
+ragIngestBtn.addEventListener('click', async () => {
+  setRagMessage('Ingest kører…', 'ok');
+  await ingestRagFolder();
 });
 
 ragClearBtn.addEventListener('click', async () => {

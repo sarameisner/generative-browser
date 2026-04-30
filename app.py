@@ -1,6 +1,9 @@
 import re
 import json
 import uuid
+import os
+import sys
+import hashlib
 import requests as http_requests
 from typing import Optional
 from urllib.parse import urlparse
@@ -11,8 +14,9 @@ import chromadb
 app = Flask(__name__)
 app.secret_key = "generative-browser-secret"
 
-MODEL      = "qwen3:1.7b"
+MODEL      = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
+KNOWLEDGE_DIR = "./knowledge_base"
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -22,6 +26,8 @@ def get_collection():
         name="site_knowledge",
         metadata={"hnsw:space": "cosine"}
     )
+
+os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
 
 # ── Embedding via Ollama ───────────────────────────────
 def embed(text: str) -> list:
@@ -42,6 +48,83 @@ def chunk_text(text: str, size: int = 400, overlap: int = 60) -> list:
         chunks.append(text[start:start + size])
         start += size - overlap
     return [c.strip() for c in chunks if c.strip()]
+
+def read_knowledge_file(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(".pdf"):
+        import pypdf
+        with open(path, "rb") as f:
+            reader = pypdf.PdfReader(f)
+            return "\n".join(p.extract_text() for p in reader.pages if p.extract_text())
+    if lower.endswith(".txt"):
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    return ""
+
+def ingest_content(col, content: str, source: str) -> int:
+    chunks = chunk_text(content)
+    if not chunks:
+        return 0
+
+    # Keep ingest idempotent per source by replacing old chunks.
+    try:
+        col.delete(where={"source": source})
+    except Exception:
+        pass
+
+    added = 0
+    for i, chunk in enumerate(chunks):
+        emb = embed(chunk)
+        if not emb:
+            continue
+        stable = hashlib.md5(f"{source}:{i}:{chunk[:100]}".encode("utf-8")).hexdigest()[:12]
+        col.add(
+            ids=[f"{source}_{i}_{stable}"],
+            embeddings=[emb],
+            documents=[chunk],
+            metadatas=[{"source": source}],
+        )
+        added += 1
+    return added
+
+def ingest_knowledge_folder() -> dict:
+    col = get_collection()
+    allowed = {".txt", ".pdf"}
+    scanned = 0
+    ingested_files = 0
+    skipped_files = []
+    total_chunks = 0
+
+    for root, _, files in os.walk(KNOWLEDGE_DIR):
+        for name in files:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in allowed:
+                continue
+            scanned += 1
+            full_path = os.path.join(root, name)
+            rel_source = os.path.relpath(full_path, KNOWLEDGE_DIR).replace("\\", "/")
+            try:
+                content = read_knowledge_file(full_path).strip()
+            except Exception:
+                skipped_files.append(rel_source)
+                continue
+            if not content:
+                skipped_files.append(rel_source)
+                continue
+            chunks_added = ingest_content(col, content, rel_source)
+            if chunks_added == 0:
+                skipped_files.append(rel_source)
+                continue
+            ingested_files += 1
+            total_chunks += chunks_added
+
+    return {
+        "knowledge_dir": KNOWLEDGE_DIR,
+        "files_scanned": scanned,
+        "files_ingested": ingested_files,
+        "chunks_added": total_chunks,
+        "skipped_files": skipped_files,
+    }
 
 # ── RAG retrieval ──────────────────────────────────────
 def retrieve(query: str, n: int = 3) -> str:
@@ -203,7 +286,18 @@ def set_profile():
 @app.route("/rag/status")
 def rag_status():
     col = get_collection()
-    return jsonify({"count": col.count(), "embed_model": EMBED_MODEL})
+    files_available = []
+    for root, _, files in os.walk(KNOWLEDGE_DIR):
+        for name in files:
+            if os.path.splitext(name)[1].lower() in {".txt", ".pdf"}:
+                rel_path = os.path.relpath(os.path.join(root, name), KNOWLEDGE_DIR).replace("\\", "/")
+                files_available.append(rel_path)
+    return jsonify({
+        "count": col.count(),
+        "embed_model": EMBED_MODEL,
+        "knowledge_dir": KNOWLEDGE_DIR,
+        "files_available": sorted(files_available),
+    })
 
 @app.route("/rag/list")
 def rag_list():
@@ -214,48 +308,10 @@ def rag_list():
     sources   = sorted(set(m.get("source", "?") for m in all_items["metadatas"]))
     return jsonify({"sources": sources, "count": col.count()})
 
-@app.route("/rag/upload", methods=["POST"])
-def rag_upload():
-    col = get_collection()
-
-    # File upload
-    if "file" in request.files:
-        f        = request.files["file"]
-        filename = f.filename or "upload"
-        if filename.lower().endswith(".pdf"):
-            import pypdf
-            reader  = pypdf.PdfReader(f)
-            content = "\n".join(
-                p.extract_text() for p in reader.pages if p.extract_text()
-            )
-        else:
-            content = f.read().decode("utf-8", errors="ignore")
-        source = filename
-
-    # JSON text paste
-    else:
-        data    = request.get_json(force=True)
-        content = data.get("text", "").strip()
-        source  = data.get("source", "manual")
-
-    if not content:
-        return jsonify({"error": "No content provided"}), 400
-
-    chunks = chunk_text(content)
-    added  = 0
-    for i, chunk in enumerate(chunks):
-        emb = embed(chunk)
-        if not emb:
-            continue
-        col.add(
-            ids=[f"{source}_{i}_{uuid.uuid4().hex[:6]}"],
-            embeddings=[emb],
-            documents=[chunk],
-            metadatas=[{"source": source}],
-        )
-        added += 1
-
-    return jsonify({"ok": True, "chunks_added": added, "source": source})
+@app.route("/rag/ingest", methods=["POST"])
+def rag_ingest():
+    result = ingest_knowledge_folder()
+    return jsonify({"ok": True, **result})
 
 @app.route("/rag/clear", methods=["POST"])
 def rag_clear():
@@ -387,4 +443,8 @@ def stream_page(sid: str):
     )
 
 if __name__ == "__main__":
+    if any(arg in {"ingest", "--ingest"} for arg in sys.argv[1:]):
+        result = ingest_knowledge_folder()
+        print(json.dumps(result, indent=2))
+        raise SystemExit(0)
     app.run(debug=True, threaded=True, port=5000)

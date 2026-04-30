@@ -65,9 +65,15 @@ Open your browser and go to: **http://localhost:5000**
 3. Watch the page generate live
 
 ### RAG — Knowledge Base
-1. Click the **KB** button in the toolbar
-2. Upload a `.txt` or `.pdf` file, or paste text directly
-3. Visit a URL related to the content — the retrieved text will appear in the debug panel and influence the generated page
+1. Put `.txt` or `.pdf` files in `knowledge_base/` (project root)
+2. Ingest them with:
+
+```bash
+python3 app.py ingest
+```
+
+3. (Optional) Open **KB** in the UI and click **Kør ingest fra mappe**
+4. Visit a URL related to the content — the retrieved text will appear in the debug panel and influence the generated page
 
 **Example:** Upload a text file describing a fictional flower shop. Visit `luna-blomster.dk`. The generated page will include your specific products, prices, and details instead of generic AI content.
 
@@ -113,6 +119,7 @@ Browser (JavaScript)
 ```
 generative-browser/
 ├── app.py              # Flask backend — routes, RAG, prompt builder
+├── knowledge_base/     # Put .txt/.pdf files here for ingest
 ├── requirements.txt    # Python dependencies
 ├── chroma_db/          # Persistent ChromaDB vector store (auto-created)
 └── templates/
@@ -136,12 +143,13 @@ Every prompt is built around the 4T's framework:
 
 ## RAG pipeline
 
-1. User uploads a document (`.txt` or `.pdf`) via the KB panel
-2. Text is split into chunks (400 characters, 60-character overlap)
-3. Each chunk is embedded using `embeddinggemma` via Ollama
-4. Embeddings are stored in a persistent **ChromaDB** collection
-5. On every page request, the URL path is used as a query
-6. The top 3 most relevant chunks are retrieved and injected into the prompt
+1. User places files (`.txt`/`.pdf`) in `knowledge_base/`
+2. `python3 app.py ingest` (or `/rag/ingest`) scans the folder recursively
+3. Text is split into chunks (400 characters, 60-character overlap)
+4. Each chunk is embedded using `embeddinggemma` via Ollama
+5. Embeddings are stored in a persistent **ChromaDB** collection
+6. On every page request, the URL path is used as a query
+7. The top 3 most relevant chunks are retrieved and injected into the prompt
 
 ---
 
