@@ -213,7 +213,7 @@ def parse_url(raw: str):
 # ── Prompt builder (4T's structure) ───────────────────
 def build_messages(url: str, domain: str, path: str,
                    context: Optional[str], profile: dict,
-                   rag_context: str = "", design_trend: str = "") -> list:
+                   design_trend: str = "") -> list:
     """
     Prompt is structured around the 4T's framework:
 
@@ -235,15 +235,6 @@ def build_messages(url: str, domain: str, path: str,
     )
 
     # ── TASK ──────────────────────────────────────────
-    rag_block = ""
-    if rag_context:
-        rag_block = (
-            "\nThe following information was retrieved from the knowledge base. "
-            "Ground the page content in these specific facts — do not invent details "
-            "that contradict this material:\n"
-            f"{rag_context}\n"
-        )
-
     context_block = ""
     if context:
         context_block = (
@@ -254,12 +245,19 @@ def build_messages(url: str, domain: str, path: str,
     task = (
         f"Generate a complete HTML page for: {url}\n"
         f"{context_block}"
-        f"{rag_block}"
-        "The page must include: navigation bar, hero/header section, "
-        "rich main content relevant to the domain, and a footer. "
-        "Use inline <style> with a cohesive modern color scheme. "
-        "Add at least 5 internal <a href='/path'> links. "
-        "Placeholder images: https://picsum.photos/800/400?random=1 (increment the number for each image)."
+        f"The page must be ABOUT {domain} — invent realistic, creative content that fits that domain. "
+        f"Do NOT write about web design, design trends, or anything meta. "
+        f"Write as if this is a real website for {domain}.\n\n"
+        "STRUCTURE RULES — follow these strictly:\n"
+        "- Navigation bar with max 4 links to subpages\n"
+        "- Hero/header section\n"
+        "- Rich main content relevant to the domain\n"
+        "- Footer\n"
+        "- Max 4 images total. Use: https://picsum.photos/800/400?random=1 (increment number per image)\n"
+        "- Max 4 internal <a href='/path'> links\n"
+        "- Reuse layout components and color palette for consistency\n"
+        "- Prioritise quality and depth over quantity — fewer, better sections\n"
+        "- Use inline <style> — no external CSS or JS libraries\n"
     )
 
     # ── TONE ──────────────────────────────────────────
@@ -268,12 +266,46 @@ def build_messages(url: str, domain: str, path: str,
     # ── TARGET ────────────────────────────────────────
     target = ts["target"]
 
+    # ── PERSONALITY — map tone to a writing mode ──────
+    tone_val = profile.get("tone", "casual")
+    personality_map = {
+        "casual":   (
+            "Write in a warm, charming voice — a little cheeky, always engaging. "
+            "The text should feel like it's gently flirting with the reader. "
+            "Clever word choices, light wit, never cold."
+        ),
+        "professional": (
+            "Write with commanding confidence — sharp, authoritative, like it runs the place. "
+            "Every sentence earns its spot. No filler."
+        ),
+        "playful":  (
+            "Go unhinged (in a good way). Be chaotic, funny, wildly creative. "
+            "Subvert what the reader expects. Make them laugh or raise an eyebrow. "
+            "The content should feel alive and slightly unpredictable."
+        ),
+        "dry":      (
+            "Be deadpan and economical. Say exactly what needs to be said, nothing more. "
+            "Dry humor is welcome — the kind that lands without announcing itself. "
+            "Cold, efficient, oddly compelling."
+        ),
+    }
+    personality = personality_map.get(tone_val, "")
+
     # ── DESIGN ────────────────────────────────────────
-    design_block = design_trend if design_trend else "Clean modern design with ample white space and a professional color scheme."
+    # Design trend is used as VISUAL STYLE ONLY — do not reproduce its text as page content
+    if design_trend:
+        design_block = (
+            "Apply the following as your visual and aesthetic direction ONLY. "
+            "Do not write about these design concepts — use them to shape CSS, layout, and mood:\n"
+            + design_trend
+        )
+    else:
+        design_block = "Clean modern design with ample white space and a professional color scheme."
 
     # ── Assemble system prompt with explicit 4T labels ─
     system = (
         f"[TRAITS]\n{traits}\n\n"
+        f"[PERSONALITY]\n{personality}\n\n"
         f"[TONE]\n{tone}\n\n"
         f"[TARGET]\n{target}\n\n"
         f"[DESIGN]\n{design_block}"
@@ -397,18 +429,13 @@ def generate():
     profile     = session.get("profile", default_profile())
     context     = domain_contexts.get(domain)
 
-    # RAG retrieval — query combines domain + path keywords
-    rag_query   = f"{domain} {path.replace('/', ' ').replace('-', ' ')}"
-    rag_context = retrieve(rag_query)
-
     # Design trend — chosen automatically via RAG based on user profile
+    # (only the design trends PDF is in the knowledge base — no content RAG)
     design_trend = retrieve_design_trend(profile)
 
-    messages = build_messages(full_url, domain, path, context, profile, rag_context, design_trend)
+    messages = build_messages(full_url, domain, path, context, profile, design_trend)
 
     debug_prompt = (
-        f"── RAG: RETRIEVED CONTENT ──────────────────\n"
-        f"{rag_context or '(ingen dokumenter i vidensbasen)'}\n\n"
         f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
         f"{design_trend or '(ingen trend fundet)'}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
