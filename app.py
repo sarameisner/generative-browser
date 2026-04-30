@@ -99,7 +99,7 @@ def sync_from_drive() -> dict:
     return {"ok": True, "files_synced": len(synced), "chunks_added": added_total, "details": synced}
 
 # ── Model config ───────────────────────────────────────
-MODEL       = "qwen3:1.7b"
+MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
 
 print(f"[config] Ollama — model: {MODEL}")
@@ -407,8 +407,6 @@ def generate():
     messages = build_messages(full_url, domain, path, context, profile, rag_context, design_trend)
 
     debug_prompt = (
-        f"── RAG: RETRIEVED CONTENT ──────────────────\n"
-        f"{rag_context or '(ingen dokumenter i vidensbasen)'}\n\n"
         f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
         f"{design_trend or '(ingen trend fundet)'}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
