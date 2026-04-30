@@ -534,6 +534,53 @@
 // ── Nav intercept injected into every iframe page ──
 const NAV_INTERCEPT = `<script>
 (function() {
+  function sanitizeUrl(url) {
+    if (!url) return '';
+    return String(url).trim().replace(/[\r\n\t]+/g, '').replace(/ /g, '%20');
+  }
+
+  function repairImage(img, fromError) {
+    if (!img || !img.getAttribute) return;
+    img.referrerPolicy = 'no-referrer';
+
+    var raw = img.getAttribute('src') || '';
+    if (!raw) {
+      var dataSrc = img.getAttribute('data-src') || '';
+      if (dataSrc) {
+        img.setAttribute('src', dataSrc);
+        raw = dataSrc;
+      }
+    }
+    var cleaned = sanitizeUrl(raw);
+    if (!cleaned) return;
+    if (raw !== cleaned) {
+      img.setAttribute('src', cleaned);
+      if (!fromError) return;
+    }
+
+    if (!fromError) return;
+
+    var retries = parseInt(img.dataset.retryCount || '0', 10);
+    if (retries >= 3) return;
+    img.dataset.retryCount = String(retries + 1);
+
+    try {
+      var u = new URL(cleaned, window.location.origin);
+      // Keep the same prompt/context, but move to a different seed when
+      // Pollinations has a slow/bad result for one specific seed.
+      if (u.hostname === 'image.pollinations.ai') {
+        var seed = parseInt(u.searchParams.get('seed') || '1', 10);
+        u.searchParams.set('seed', String(seed + 97 + retries * 37));
+        u.searchParams.set('retry', String(Date.now()));
+        img.src = u.toString();
+        return;
+      }
+    } catch (_) {}
+
+    var sep = cleaned.indexOf('?') >= 0 ? '&' : '?';
+    img.src = cleaned + sep + 'retry=' + Date.now();
+  }
+
   document.addEventListener('click', function(e) {
     var link = e.target.closest('a[href]');
     if (!link) return;
@@ -543,6 +590,24 @@ const NAV_INTERCEPT = `<script>
     e.stopPropagation();
     window.parent.postMessage({ type: 'nav', href: href }, '*');
   }, true);
+
+  document.addEventListener('error', function(e) {
+    if (e.target && e.target.tagName === 'IMG') repairImage(e.target, true);
+  }, true);
+
+  var observer = new MutationObserver(function(mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var nodes = mutations[i].addedNodes || [];
+      for (var j = 0; j < nodes.length; j++) {
+        var n = nodes[j];
+        if (!n || n.nodeType !== 1) continue;
+        if (n.tagName === 'IMG') repairImage(n, false);
+        var imgs = n.querySelectorAll ? n.querySelectorAll('img') : [];
+        for (var k = 0; k < imgs.length; k++) repairImage(imgs[k], false);
+      }
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
 <\/script>`;
 
@@ -734,6 +799,7 @@ async function navigateTo(url, pushToHistory = true) {
 
     let accumulated = NAV_INTERCEPT;
     let chunkCount  = 0;
+    let finalImageUrls = null;
 
     currentES = new EventSource(`/stream/${stream_id}`);
 
@@ -758,6 +824,15 @@ async function navigateTo(url, pushToHistory = true) {
       if (payload.done) {
         currentES.close(); currentES = null;
         doc.close();
+        if (finalImageUrls && finalImageUrls.length) {
+          const imgs = Array.from(doc.querySelectorAll('img'));
+          imgs.forEach((img, idx) => {
+            if (idx < finalImageUrls.length) img.setAttribute('src', finalImageUrls[idx]);
+          });
+          if (doc.documentElement) {
+            accumulated = '<!DOCTYPE html>\\n' + doc.documentElement.outerHTML;
+          }
+        }
         setLoading(false);
         const titleM    = accumulated.match(/<title[^>]*>(.*?)<\/title>/i);
         const pageTitle = titleM ? titleM[1].trim() : domainPart;
@@ -778,6 +853,10 @@ async function navigateTo(url, pushToHistory = true) {
         if (chunkCount === 1) loadingOverlay.classList.remove('active');
         doc.write(payload.chunk);
         if (chunkCount % 5 === 0) setStatus(`Generating… ${accumulated.length} bytes`);
+      }
+
+      if (payload.image_urls && Array.isArray(payload.image_urls)) {
+        finalImageUrls = payload.image_urls;
       }
     };
 

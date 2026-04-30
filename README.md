@@ -12,6 +12,7 @@ Built as an exam project for the **LLM for Developers** course at Erhvervsakadem
 - **RAG pipeline** — upload documents to a local ChromaDB knowledge base; relevant chunks are retrieved and injected into the prompt before generation
 - **User style profiles** — choose reading style, tone, and experience level; the prompt changes visibly and produces different pages for the same URL
 - **Domain memory** — the browser remembers brand identity (colors, fonts, tone) across pages on the same domain
+- **AI image generation** — each generated page receives domain-aware image URLs from a text-to-image model and uses those visuals in hero/cards/content sections
 - **4T's prompt structure** — all prompts are explicitly structured around Traits, Task, Tone, and Target
 - **Back / Forward navigation** — full history stack with cached HTML for instant back navigation
 - **Prompt debug panel** — collapsible panel showing exactly what was sent to the LLM, including retrieved RAG context
@@ -160,3 +161,4 @@ Every prompt is built around the 4T's framework:
 |-------|---------|
 | `qwen3:1.7b` | HTML page generation |
 | `embeddinggemma` | Document embeddings for RAG |
+| `flux` (via Pollinations API) | Text-to-image URLs injected into generated pages |
