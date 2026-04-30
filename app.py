@@ -99,7 +99,7 @@ def sync_from_drive() -> dict:
     return {"ok": True, "files_synced": len(synced), "chunks_added": added_total, "details": synced}
 
 # ── Model config ───────────────────────────────────────
-MODEL       = "qwen3:1.7b"
+MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
 
 print(f"[config] Ollama — model: {MODEL}")
