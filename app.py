@@ -5,7 +5,7 @@ import os
 import io
 import requests as http_requests
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context, session
 import ollama
 import chromadb
@@ -99,10 +99,12 @@ def sync_from_drive() -> dict:
     return {"ok": True, "files_synced": len(synced), "chunks_added": added_total, "details": synced}
 
 # ── Model config ───────────────────────────────────────
-MODEL       = "qwen3:1.7b"
+MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
+IMAGE_MODEL = "flux"
 
 print(f"[config] Ollama — model: {MODEL}")
+print(f"[config] Image model: {IMAGE_MODEL} (via Pollinations)")
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -154,6 +156,8 @@ def retrieve(query: str, n: int = 3) -> str:
 # ── Domain & session state ─────────────────────────────
 domain_contexts = {}
 pending_streams = {}
+generated_images = {}
+generated_image_cache = {}
 
 # ── Profile helpers ────────────────────────────────────
 READING_STYLES = {
@@ -210,9 +214,91 @@ def parse_url(raw: str):
     p = urlparse(raw)
     return p.netloc, p.path or "/", raw
 
+def build_image_urls(domain: str, path: str, count: int = 3) -> list:
+    """
+    Build deterministic image URLs using a text-to-image model endpoint.
+    These URLs are injected into the page prompt so generated HTML can use
+    domain-specific visuals instead of generic placeholders.
+    """
+    slug = f"{domain} {path.replace('/', ' ').replace('-', ' ')}".strip()
+    base_prompt = f"high quality website hero photo for {slug}, professional lighting, modern style"
+    urls = []
+    for i in range(1, count + 1):
+        prompt = http_requests.utils.quote(f"{base_prompt}, variation {i}")
+        remote_url = (
+            "https://image.pollinations.ai/prompt/"
+            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={i}"
+        )
+        token = uuid.uuid4().hex
+        generated_images[token] = {"url": remote_url}
+        urls.append(f"/api/image/{token}")
+    return urls
+
+def resolve_image_token(token: str):
+    cached = generated_image_cache.get(token)
+    if cached:
+        return cached
+
+    entry = generated_images.get(token)
+    if not entry:
+        return None
+    if isinstance(entry, dict):
+        remote_url = entry.get("url", "")
+    else:
+        # Backward compatibility for any old in-memory values.
+        remote_url = entry
+    if not remote_url:
+        return None
+
+    parsed = urlsplit(remote_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    candidate_urls = [remote_url]
+    seed_raw = query.get("seed", "1")
+    try:
+        seed = int(seed_raw)
+    except ValueError:
+        seed = 1
+    for bump in (31, 97, 173):
+        q_variant = dict(query)
+        q_variant["seed"] = str(seed + bump)
+        candidate_urls.append(
+            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
+        )
+    # Same prompt, provider default model fallback.
+    q_no_model = dict(query)
+    q_no_model.pop("model", None)
+    if q_no_model != query:
+        candidate_urls.append(
+            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_no_model), parsed.fragment))
+        )
+        for bump in (31, 97):
+            q_variant = dict(q_no_model)
+            q_variant["seed"] = str(seed + bump)
+            candidate_urls.append(
+                urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
+            )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "image/*,*/*;q=0.8",
+        "Referer": "",
+    }
+    for candidate in candidate_urls:
+        for _ in range(2):
+            try:
+                resp = http_requests.get(candidate, timeout=35, headers=headers)
+                if resp.status_code != 200 or not resp.content:
+                    continue
+                content_type = resp.headers.get("Content-Type", "image/jpeg")
+                generated_image_cache[token] = (resp.content, content_type)
+                return generated_image_cache[token]
+            except Exception:
+                continue
+    return None
+
 # ── Prompt builder (4T's structure) ───────────────────
 def build_messages(url: str, domain: str, path: str,
-                   context: Optional[str], profile: dict,
+                   context: Optional[str], profile: dict, image_urls: list,
                    rag_context: str = "", design_trend: str = "") -> list:
     """
     Prompt is structured around the 4T's framework:
@@ -259,7 +345,9 @@ def build_messages(url: str, domain: str, path: str,
         "rich main content relevant to the domain, and a footer. "
         "Use inline <style> with a cohesive modern color scheme. "
         "Add at least 5 internal <a href='/path'> links. "
-        "Placeholder images: https://picsum.photos/800/400?random=1 (increment the number for each image)."
+        "Use these AI-generated image URLs for all visual imagery (hero, cards, banners) instead of placeholder services:\n"
+        f"{chr(10).join(f'- {u}' for u in image_urls)}\n"
+        "Only use image URLs from this list for <img src> and CSS background-image values."
     )
 
     # ── TONE ──────────────────────────────────────────
@@ -313,6 +401,20 @@ def set_profile():
     }
     session["profile"] = profile
     return jsonify({"ok": True, "profile": profile})
+
+@app.route("/api/image/<token>")
+def proxy_generated_image(token: str):
+    resolved = resolve_image_token(token)
+    if not resolved:
+        if token not in generated_images:
+            return jsonify({"error": "Unknown image token"}), 404
+        return jsonify({"error": "Image upstream unavailable"}), 502
+    body, content_type = resolved
+    return Response(
+        body,
+        mimetype=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 # ── RAG management ─────────────────────────────────────
 @app.route("/rag/status")
@@ -396,6 +498,7 @@ def generate():
     domain, path, full_url = parse_url(raw_url)
     profile     = session.get("profile", default_profile())
     context     = domain_contexts.get(domain)
+    image_urls  = build_image_urls(domain, path, count=3)
 
     # RAG retrieval — query combines domain + path keywords
     rag_query   = f"{domain} {path.replace('/', ' ').replace('-', ' ')}"
@@ -404,13 +507,15 @@ def generate():
     # Design trend — chosen automatically via RAG based on user profile
     design_trend = retrieve_design_trend(profile)
 
-    messages = build_messages(full_url, domain, path, context, profile, rag_context, design_trend)
+    messages = build_messages(full_url, domain, path, context, profile, image_urls, rag_context, design_trend)
 
     debug_prompt = (
         f"── RAG: RETRIEVED CONTENT ──────────────────\n"
         f"{rag_context or '(ingen dokumenter i vidensbasen)'}\n\n"
         f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
         f"{design_trend or '(ingen trend fundet)'}\n\n"
+        f"── IMAGE MODEL URLS ({IMAGE_MODEL}) ─────────\n"
+        f"{chr(10).join(image_urls)}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
         f"{messages[0]['content']}\n\n"
         f"── 4T USER PROMPT (TASK) ───────────────────\n"
@@ -418,7 +523,7 @@ def generate():
     )
 
     sid = str(uuid.uuid4())
-    pending_streams[sid] = {"url": full_url, "domain": domain, "messages": messages}
+    pending_streams[sid] = {"url": full_url, "domain": domain, "path": path, "messages": messages}
     return jsonify({"stream_id": sid, "url": full_url, "debug_prompt": debug_prompt})
 
 @app.route("/stream/<sid>")
@@ -428,6 +533,7 @@ def stream_page(sid: str):
 
     info     = pending_streams.pop(sid)
     domain   = info["domain"]
+    path     = info.get("path", "/")
     messages = info["messages"]
 
     def generate_sse():
@@ -487,8 +593,18 @@ def stream_page(sid: str):
                     accumulated.append(buffer)
                     yield f"data: {json.dumps({'chunk': buffer})}\n\n"
 
-            # Store domain context
             full_html = "".join(accumulated)
+            img_count = len(re.findall(r"<img\b", full_html, re.I))
+            if img_count > 0:
+                final_image_urls = build_image_urls(domain, path, count=img_count)
+                # Pre-fetch sequentially to reduce burst upstream 502s when browser
+                # requests many images at once.
+                for image_url in final_image_urls:
+                    token = image_url.rsplit("/", 1)[-1]
+                    resolve_image_token(token)
+                yield f"data: {json.dumps({'image_urls': final_image_urls})}\n\n"
+
+            # Store domain context
             title_m   = re.search(r"<title[^>]*>(.*?)</title>", full_html, re.I | re.S)
             style_m   = re.search(r"<style[^>]*>(.*?)</style>",  full_html, re.I | re.S)
             title         = title_m.group(1).strip() if title_m else domain
