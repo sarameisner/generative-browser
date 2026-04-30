@@ -259,7 +259,10 @@ def build_messages(url: str, domain: str, path: str,
         "rich main content relevant to the domain, and a footer. "
         "Use inline <style> with a cohesive modern color scheme. "
         "Add at least 5 internal <a href='/path'> links. "
-        "Placeholder images: https://picsum.photos/800/400?random=1 (increment the number for each image)."
+        f"Images: use https://image.pollinations.ai/prompt/DESCRIPTION where DESCRIPTION is a "
+        f"short, hyphen-separated phrase (no spaces, no quotes) describing what the image shows "
+        f"in context of {domain} — e.g. 'modern-flower-shop-storefront' or 'fresh-roses-bouquet'. "
+        f"Every image must have a unique, relevant description. Never use spaces in the URL."
     )
 
     # ── TONE ──────────────────────────────────────────
