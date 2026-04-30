@@ -338,8 +338,13 @@ def build_messages(url: str, domain: str, path: str,
         "- Navigation bar with max 4 links to subpages\n"
         "- Hero/header section\n"
         "- Rich main content relevant to the domain\n"
-        "- Footer\n"
-        "- Max 4 images total. Use: https://picsum.photos/800/400?random=1 (increment number per image)\n"
+        "- Footer with generic copyright only — do NOT include any real person's name, email, or personal details\n"
+        + (
+            f"- Exactly 1 image. Use ONLY this URL: {image_urls[0]}\n"
+            if image_urls else
+            "- Exactly 1 image. Use: https://picsum.photos/800/400?random=1\n"
+        )
+        +
         "- Max 4 internal <a href='/path'> links\n"
         "- Reuse layout components and color palette for consistency\n"
         "- Prioritise quality and depth over quantity — fewer, better sections\n"
@@ -528,7 +533,7 @@ def generate():
     domain, path, full_url = parse_url(raw_url)
     profile     = session.get("profile", default_profile())
     context     = domain_contexts.get(domain)
-    image_urls  = build_image_urls(domain, path, count=3)
+    image_urls  = build_image_urls(domain, path, count=1)
 
     # RAG retrieval — query combines domain + path keywords
     rag_query   = f"{domain} {path.replace('/', ' ').replace('-', ' ')}"
@@ -552,7 +557,7 @@ def generate():
     )
 
     sid = str(uuid.uuid4())
-    pending_streams[sid] = {"url": full_url, "domain": domain, "path": path, "messages": messages}
+    pending_streams[sid] = {"url": full_url, "domain": domain, "path": path, "messages": messages, "image_urls": image_urls}
     return jsonify({"stream_id": sid, "url": full_url, "debug_prompt": debug_prompt})
 
 @app.route("/stream/<sid>")
@@ -560,10 +565,11 @@ def stream_page(sid: str):
     if sid not in pending_streams:
         return jsonify({"error": "Invalid stream ID"}), 404
 
-    info     = pending_streams.pop(sid)
-    domain   = info["domain"]
-    path     = info.get("path", "/")
-    messages = info["messages"]
+    info       = pending_streams.pop(sid)
+    domain     = info["domain"]
+    path       = info.get("path", "/")
+    messages   = info["messages"]
+    image_urls = info.get("image_urls", [])
 
     def generate_sse():
         accumulated    = []
@@ -623,15 +629,22 @@ def stream_page(sid: str):
                     yield f"data: {json.dumps({'chunk': buffer})}\n\n"
 
             full_html = "".join(accumulated)
-            img_count = len(re.findall(r"<img\b", full_html, re.I))
-            if img_count > 0:
-                final_image_urls = build_image_urls(domain, path, count=img_count)
-                # Pre-fetch sequentially to reduce burst upstream 502s when browser
-                # requests many images at once.
-                for image_url in final_image_urls:
+
+            # Guarantee at least 1 image — inject one before </body> if model forgot
+            if image_urls and not re.search(r"<img\b", full_html, re.I):
+                inject = (
+                    f'<div style="max-width:900px;margin:40px auto;padding:0 24px">'
+                    f'<img src="{image_urls[0]}" style="width:100%;border-radius:8px" alt=""></div>'
+                )
+                full_html = full_html.replace("</body>", inject + "</body>")
+                accumulated = [full_html]
+                yield f"data: {json.dumps({'chunk': inject})}\n\n"
+
+            # Pre-fetch the pre-built image tokens so they're cached when the browser requests them
+            if image_urls:
+                for image_url in image_urls:
                     token = image_url.rsplit("/", 1)[-1]
                     resolve_image_token(token)
-                yield f"data: {json.dumps({'image_urls': final_image_urls})}\n\n"
 
             # Store domain context
             title_m   = re.search(r"<title[^>]*>(.*?)</title>", full_html, re.I | re.S)

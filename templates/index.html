@@ -532,8 +532,8 @@
 
 <script>
 // ── Nav intercept injected into every iframe page ──
-const NAV_INTERCEPT = `<script>
-(function() {
+// NAV_INTERCEPT_JS: the raw JS (no script tags) so we can inject reliably
+const NAV_INTERCEPT_JS = `(function() {
   function sanitizeUrl(url) {
     if (!url) return '';
     return String(url).trim().replace(/[\r\n\t]+/g, '').replace(/ /g, '%20');
@@ -581,16 +581,6 @@ const NAV_INTERCEPT = `<script>
     img.src = cleaned + sep + 'retry=' + Date.now();
   }
 
-  document.addEventListener('click', function(e) {
-    var link = e.target.closest('a[href]');
-    if (!link) return;
-    var href = link.getAttribute('href');
-    if (!href || href === '#' || href.startsWith('javascript:')) return;
-    e.preventDefault();
-    e.stopPropagation();
-    window.parent.postMessage({ type: 'nav', href: href }, '*');
-  }, true);
-
   document.addEventListener('error', function(e) {
     if (e.target && e.target.tagName === 'IMG') repairImage(e.target, true);
   }, true);
@@ -608,8 +598,29 @@ const NAV_INTERCEPT = `<script>
     }
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
-})();
-<\/script>`;
+})();`;
+
+// Wrapped version for document.write() during streaming
+const NAV_INTERCEPT = '<script>' + NAV_INTERCEPT_JS + '<' + '/script>';
+
+// Attach click-interceptor directly on the iframe document from the parent.
+// Because the iframe uses allow-same-origin, the parent can add event listeners
+// directly — no script injection, no postMessage needed.
+function installNavListener(iframeDoc) {
+  try {
+    iframeDoc.addEventListener('click', function navClickHandler(e) {
+      var t = e.target;
+      var link = (t && t.closest) ? t.closest('a[href]') : null;
+      if (!link) return;
+      var href = link.getAttribute('href');
+      if (!href || href === '#' || href.startsWith('javascript:') || href.startsWith('mailto:')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      var resolved = resolveHref(href, historyStack[historyIndex]?.url || '');
+      navigateTo(resolved);
+    }, true); // capture phase — fires before any inline onclick
+  } catch(err) {}
+}
 
 // ── State ──────────────────────────────────────────
 const historyStack = [];
@@ -824,6 +835,7 @@ async function navigateTo(url, pushToHistory = true) {
       if (payload.done) {
         currentES.close(); currentES = null;
         doc.close();
+        installNavListener(doc);
         if (finalImageUrls && finalImageUrls.length) {
           const imgs = Array.from(doc.querySelectorAll('img'));
           imgs.forEach((img, idx) => {
@@ -883,6 +895,7 @@ function loadCached(entry) {
   doc.open('text/html', 'replace');
   doc.write(entry.html);
   doc.close();
+  installNavListener(doc);
   setStatus(`Loaded from cache — ${entry.html.length} bytes`);
 }
 
@@ -913,6 +926,25 @@ window.addEventListener('message', e => {
   if (!e.data || e.data.type !== 'nav') return;
   const resolved = resolveHref(e.data.href, historyStack[historyIndex]?.url || '');
   navigateTo(resolved);
+});
+
+// ── Fallback: catch iframe navigating to Flask URL ──
+// If NAV_INTERCEPT didn't stop a click (race/timing), the iframe loads a Flask
+// route (e.g. /about) → 404. Detect this and generate the correct page instead.
+viewport.addEventListener('load', () => {
+  if (isLoading) return; // already generating
+  try {
+    const href = viewport.contentWindow.location.href;
+    if (!href || href === 'about:blank') return;
+    // If the iframe ended up on our own Flask server, that's a leaked navigation
+    if (/^https?:\/\/localhost(:\d+)?\//.test(href)) {
+      const path = href.replace(/^https?:\/\/localhost(:\d+)?/, '');
+      if (!path || path === '/') return;
+      const currentUrl = historyStack[historyIndex]?.url || '';
+      const domain = currentUrl.split('/')[0];
+      if (domain) navigateTo(domain + path);
+    }
+  } catch(e) {}
 });
 
 // ══════════════════════════════════════════════════════
@@ -962,7 +994,7 @@ async function uploadToRag(formData) {
   await refreshRagStatus();
 }
 
-ragBtn.addEventListener('click', () => {
+if (ragBtn) ragBtn.addEventListener('click', () => {
   ragOverlay.classList.remove('hidden');
   refreshRagStatus();
 });
