@@ -4,13 +4,13 @@ import uuid
 import random
 import os
 import io
+import time
 import requests as http_requests
 from typing import Optional
 from urllib.parse import urlparse
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context, session
 import ollama
 import chromadb
-import fal_client
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
@@ -103,10 +103,13 @@ def sync_from_drive() -> dict:
 # ── Model config ───────────────────────────────────────
 MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
-IMAGE_MODEL = os.environ.get("FAL_IMAGE_MODEL", "fal-ai/flux/schnell")
+IMAGE_MODEL = os.environ.get("COMFY_IMAGE_MODEL", "comfy-default")
+COMFY_BASE_URL = os.environ.get("COMFY_BASE_URL", "https://cloud.comfy.org").rstrip("/")
+COMFY_TIMEOUT_SECONDS = int(os.environ.get("COMFY_TIMEOUT_SECONDS", "120"))
 
 print(f"[config] Ollama — model: {MODEL}")
-print(f"[config] Image model: {IMAGE_MODEL} (via fal.ai)")
+print(f"[config] Image provider: comfy")
+print(f"[config] Image model hint: {IMAGE_MODEL}")
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -162,9 +165,150 @@ generated_images = {}
 generated_image_cache = {}
 
 
-def fal_ready() -> bool:
-    # fal_client reads auth from FAL_KEY in environment.
-    return bool(os.environ.get("FAL_KEY"))
+def comfy_ready() -> bool:
+    # Comfy Cloud uses X-API-Key header.
+    return bool(os.environ.get("COMFY_API_KEY"))
+
+
+def comfy_headers() -> dict:
+    return {
+        "Content-Type": "application/json",
+        "X-API-Key": os.environ.get("COMFY_API_KEY", ""),
+    }
+
+
+def comfy_build_workflow(prompt: str, seed: int) -> dict:
+    # Basic SD1.5 workflow compatible with common Comfy installs/cloud APIs.
+    return {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": seed,
+                "steps": 20,
+                "cfg": 8,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+            },
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": os.environ.get("COMFY_CHECKPOINT", "v1-5-pruned-emaonly.safetensors")},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"width": 1280, "height": 720, "batch_size": 1},
+        },
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry, low quality", "clip": ["4", 1]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "generative-browser", "images": ["8", 0]},
+        },
+    }
+
+
+def comfy_submit_prompt(prompt: str, seed: int) -> Optional[str]:
+    payload = {"prompt": comfy_build_workflow(prompt, seed)}
+    for endpoint in ("/api/prompt", "/prompt"):
+        try:
+            resp = http_requests.post(
+                f"{COMFY_BASE_URL}{endpoint}",
+                json=payload,
+                headers=comfy_headers(),
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                continue
+            body = resp.json()
+            prompt_id = body.get("prompt_id")
+            if prompt_id:
+                return prompt_id
+        except Exception:
+            continue
+    return None
+
+
+def comfy_extract_image_info(history_entry: dict) -> Optional[dict]:
+    outputs = history_entry.get("outputs", {})
+    for node_out in outputs.values():
+        images = node_out.get("images", [])
+        if images:
+            return images[0]
+    return None
+
+
+def comfy_poll_image_info(prompt_id: str) -> Optional[dict]:
+    deadline = time.time() + COMFY_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        for endpoint in (
+            f"/api/history/{prompt_id}",
+            f"/history/{prompt_id}",
+            "/api/history",
+            "/history",
+        ):
+            try:
+                resp = http_requests.get(
+                    f"{COMFY_BASE_URL}{endpoint}",
+                    headers=comfy_headers(),
+                    timeout=20,
+                )
+                if resp.status_code != 200:
+                    continue
+                body = resp.json()
+                # /history/{id} shape
+                if isinstance(body, dict) and "outputs" in body:
+                    image_info = comfy_extract_image_info(body)
+                    if image_info:
+                        return image_info
+                # /history shape
+                if isinstance(body, dict):
+                    entry = body.get(prompt_id)
+                    if isinstance(entry, dict):
+                        image_info = comfy_extract_image_info(entry)
+                        if image_info:
+                            return image_info
+            except Exception:
+                continue
+        time.sleep(2)
+    return None
+
+
+def comfy_fetch_image(image_info: dict) -> Optional[tuple]:
+    # Some Comfy deployments return a direct URL.
+    direct_url = image_info.get("url")
+    if direct_url:
+        try:
+            resp = http_requests.get(direct_url, timeout=45)
+            if resp.status_code == 200 and resp.content:
+                return resp.content, resp.headers.get("Content-Type", "image/png")
+        except Exception:
+            pass
+
+    filename = image_info.get("filename")
+    if not filename:
+        return None
+    view_query = {"filename": filename, "type": image_info.get("type", "output")}
+    if image_info.get("subfolder"):
+        view_query["subfolder"] = image_info["subfolder"]
+    for endpoint in ("/api/view", "/view"):
+        try:
+            resp = http_requests.get(
+                f"{COMFY_BASE_URL}{endpoint}",
+                params=view_query,
+                headers={"X-API-Key": os.environ.get("COMFY_API_KEY", "")},
+                timeout=45,
+            )
+            if resp.status_code == 200 and resp.content:
+                return resp.content, resp.headers.get("Content-Type", "image/png")
+        except Exception:
+            continue
+    return None
 
 # ── Profile helpers ────────────────────────────────────
 READING_STYLES = {
@@ -232,9 +376,10 @@ def build_image_urls(domain: str, path: str, count: int = 3) -> list:
     urls = []
     for i in range(1, count + 1):
         # Keep variation explicit so multiple image slots are not identical.
-        prompt = f"{base_prompt}, variation {i}, seed {random.randint(1, 2_147_483_647)}"
+        seed = random.randint(1, 2_147_483_647)
+        prompt = f"{base_prompt}, variation {i}, seed {seed}"
         token = uuid.uuid4().hex
-        generated_images[token] = {"prompt": prompt}
+        generated_images[token] = {"prompt": prompt, "seed": seed}
         urls.append(f"/api/image/{token}")
     return urls
 
@@ -250,28 +395,27 @@ def resolve_image_token(token: str):
     if not prompt:
         return None
 
-    if not fal_ready():
-        print("[image] FAL_KEY is missing; cannot generate images")
+    if not comfy_ready():
+        print("[image] COMFY_API_KEY is missing; cannot generate images")
         return None
-
     try:
-        result = fal_client.subscribe(
-            IMAGE_MODEL,
-            arguments={"prompt": prompt},
-        )
-        images = result.get("images", [])
-        image_url = images[0].get("url") if images else None
-        if not image_url:
+        seed = int(entry.get("seed", 1))
+        prompt_id = comfy_submit_prompt(prompt, seed)
+        if not prompt_id:
+            print("[image] comfy submit failed")
             return None
-        resp = http_requests.get(image_url, timeout=45)
-        if resp.status_code != 200 or not resp.content:
+        image_info = comfy_poll_image_info(prompt_id)
+        if not image_info:
+            print("[image] comfy timeout waiting for image")
             return None
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
-        payload = resp.content
-        generated_image_cache[token] = (payload, content_type)
+        fetched = comfy_fetch_image(image_info)
+        if not fetched:
+            print("[image] comfy image fetch failed")
+            return None
+        generated_image_cache[token] = fetched
         return generated_image_cache[token]
     except Exception as exc:
-        print(f"[image] generation failed: {exc}")
+        print(f"[image] comfy generation failed: {exc}")
         return None
 
 # ── Prompt builder (4T's structure) ───────────────────
@@ -526,7 +670,7 @@ def generate():
     debug_prompt = (
         f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
         f"{design_trend or '(ingen trend fundet)'}\n\n"
-        f"── IMAGE TOKENS ({IMAGE_MODEL} via fal.ai) ─────────\n"
+        f"── IMAGE TOKENS ({IMAGE_MODEL} via comfy) ─────────\n"
         f"{chr(10).join(image_urls)}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
         f"{messages[0]['content']}\n\n"
