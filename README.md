@@ -23,6 +23,7 @@ Built as an exam project for the **LLM for Developers** course at Erhvervsakadem
 
 - Python 3.9+
 - [Ollama](https://ollama.com) installed and running
+- `credentials.json` in the project root (Google Drive service account credentials used to sync the RAG knowledge base)
 - The following Ollama models pulled:
 
 ```bash
@@ -38,6 +39,10 @@ ollama pull embeddinggemma
 # 1. Clone the repository
 git clone https://github.com/YOUR_USERNAME/generative-browser.git
 cd generative-browser
+
+# 1.5 Add Google Drive credentials
+# Place your service account credentials file here:
+# ./credentials.json
 
 # 2. Install Python dependencies
 pip3 install flask ollama chromadb pypdf requests
