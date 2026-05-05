@@ -6,10 +6,11 @@ import os
 import io
 import requests as http_requests
 from typing import Optional
-from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context, session
 import ollama
 import chromadb
+import fal_client
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
@@ -102,10 +103,10 @@ def sync_from_drive() -> dict:
 # ── Model config ───────────────────────────────────────
 MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
-IMAGE_MODEL = "flux"
+IMAGE_MODEL = os.environ.get("FAL_IMAGE_MODEL", "fal-ai/flux/schnell")
 
 print(f"[config] Ollama — model: {MODEL}")
-print(f"[config] Image model: {IMAGE_MODEL} (via Pollinations)")
+print(f"[config] Image model: {IMAGE_MODEL} (via fal.ai)")
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -159,6 +160,11 @@ domain_contexts = {}
 pending_streams = {}
 generated_images = {}
 generated_image_cache = {}
+
+
+def fal_ready() -> bool:
+    # fal_client reads auth from FAL_KEY in environment.
+    return bool(os.environ.get("FAL_KEY"))
 
 # ── Profile helpers ────────────────────────────────────
 READING_STYLES = {
@@ -217,21 +223,18 @@ def parse_url(raw: str):
 
 def build_image_urls(domain: str, path: str, count: int = 3) -> list:
     """
-    Build deterministic image URLs using a text-to-image model endpoint.
-    These URLs are injected into the page prompt so generated HTML can use
-    domain-specific visuals instead of generic placeholders.
+    Build local image proxy URLs backed by fal.ai text-to-image generation.
+    The token keeps frontend HTML stable while actual image bytes are generated
+    on-demand in resolve_image_token().
     """
     slug = f"{domain} {path.replace('/', ' ').replace('-', ' ')}".strip()
     base_prompt = f"high quality website hero photo for {slug}, professional lighting, modern style"
     urls = []
     for i in range(1, count + 1):
-        prompt = http_requests.utils.quote(f"{base_prompt}, variation {i}")
-        remote_url = (
-            "https://image.pollinations.ai/prompt/"
-            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={random.randint(1, 10)}"
-        )
+        # Keep variation explicit so multiple image slots are not identical.
+        prompt = f"{base_prompt}, variation {i}, seed {random.randint(1, 2_147_483_647)}"
         token = uuid.uuid4().hex
-        generated_images[token] = {"url": remote_url}
+        generated_images[token] = {"prompt": prompt}
         urls.append(f"/api/image/{token}")
     return urls
 
@@ -243,59 +246,33 @@ def resolve_image_token(token: str):
     entry = generated_images.get(token)
     if not entry:
         return None
-    if isinstance(entry, dict):
-        remote_url = entry.get("url", "")
-    else:
-        # Backward compatibility for any old in-memory values.
-        remote_url = entry
-    if not remote_url:
+    prompt = entry.get("prompt") if isinstance(entry, dict) else None
+    if not prompt:
         return None
 
-    parsed = urlsplit(remote_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    candidate_urls = [remote_url]
-    seed_raw = query.get("seed", "1")
-    try:
-        seed = int(seed_raw)
-    except ValueError:
-        seed = 1
-    for bump in (31, 97, 173):
-        q_variant = dict(query)
-        q_variant["seed"] = str(seed + bump)
-        candidate_urls.append(
-            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
-        )
-    # Same prompt, provider default model fallback.
-    q_no_model = dict(query)
-    q_no_model.pop("model", None)
-    if q_no_model != query:
-        candidate_urls.append(
-            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_no_model), parsed.fragment))
-        )
-        for bump in (31, 97):
-            q_variant = dict(q_no_model)
-            q_variant["seed"] = str(seed + bump)
-            candidate_urls.append(
-                urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
-            )
+    if not fal_ready():
+        print("[image] FAL_KEY is missing; cannot generate images")
+        return None
 
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "image/*,*/*;q=0.8",
-        "Referer": "",
-    }
-    for candidate in candidate_urls:
-        for _ in range(2):
-            try:
-                resp = http_requests.get(candidate, timeout=35, headers=headers)
-                if resp.status_code != 200 or not resp.content:
-                    continue
-                content_type = resp.headers.get("Content-Type", "image/jpeg")
-                generated_image_cache[token] = (resp.content, content_type)
-                return generated_image_cache[token]
-            except Exception:
-                continue
-    return None
+    try:
+        result = fal_client.subscribe(
+            IMAGE_MODEL,
+            arguments={"prompt": prompt},
+        )
+        images = result.get("images", [])
+        image_url = images[0].get("url") if images else None
+        if not image_url:
+            return None
+        resp = http_requests.get(image_url, timeout=45)
+        if resp.status_code != 200 or not resp.content:
+            return None
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
+        payload = resp.content
+        generated_image_cache[token] = (payload, content_type)
+        return generated_image_cache[token]
+    except Exception as exc:
+        print(f"[image] generation failed: {exc}")
+        return None
 
 # ── Prompt builder (4T's structure) ───────────────────
 def build_messages(url: str, domain: str, path: str,
@@ -549,7 +526,7 @@ def generate():
     debug_prompt = (
         f"── RAG: DESIGN TREND (auto-valgt) ─────────\n"
         f"{design_trend or '(ingen trend fundet)'}\n\n"
-        f"── IMAGE MODEL URLS ({IMAGE_MODEL}) ─────────\n"
+        f"── IMAGE TOKENS ({IMAGE_MODEL} via fal.ai) ─────────\n"
         f"{chr(10).join(image_urls)}\n\n"
         f"── 4T SYSTEM PROMPT ────────────────────────\n"
         f"{messages[0]['content']}\n\n"
