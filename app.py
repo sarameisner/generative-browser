@@ -1,6 +1,7 @@
 import re
 import json
 import uuid
+import random
 import os
 import io
 import requests as http_requests
@@ -227,7 +228,7 @@ def build_image_urls(domain: str, path: str, count: int = 3) -> list:
         prompt = http_requests.utils.quote(f"{base_prompt}, variation {i}")
         remote_url = (
             "https://image.pollinations.ai/prompt/"
-            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={i}"
+            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={random.randint(1, 10)}"
         )
         token = uuid.uuid4().hex
         generated_images[token] = {"url": remote_url}
