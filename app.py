@@ -13,6 +13,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
 
+# Flask app that generates full HTML pages from a URL-style prompt,
+# enriches prompts with local RAG context, and streams model output via SSE.
 app = Flask(__name__)
 app.secret_key = "generative-browser-secret"
 
@@ -22,6 +24,7 @@ CREDENTIALS_FILE  = os.path.join(os.path.dirname(__file__), "credentials.json")
 DRIVE_SCOPES      = ["https://www.googleapis.com/auth/drive.readonly"]
 
 def get_drive_service():
+    # Authenticate with a service account and return a Drive API client.
     creds = service_account.Credentials.from_service_account_file(
         CREDENTIALS_FILE, scopes=DRIVE_SCOPES
     )
@@ -49,6 +52,7 @@ def sync_from_drive() -> dict:
         # Download file content
         try:
             if mime == "application/pdf":
+                # PDFs are parsed page-by-page into plain text.
                 request_dl = service.files().get_media(fileId=file_id)
                 buf = io.BytesIO()
                 downloader = MediaIoBaseDownload(buf, request_dl)
@@ -60,6 +64,7 @@ def sync_from_drive() -> dict:
                 reader  = pypdf.PdfReader(buf)
                 content = "\n".join(p.extract_text() for p in reader.pages if p.extract_text())
             else:
+                # Text-like files are decoded as UTF-8 with fallback behavior.
                 request_dl = service.files().get_media(fileId=file_id)
                 buf = io.BytesIO()
                 downloader = MediaIoBaseDownload(buf, request_dl)
@@ -85,6 +90,7 @@ def sync_from_drive() -> dict:
             emb = embed(chunk)
             if not emb:
                 continue
+            # Every chunk stores text + embedding + source metadata for later retrieval.
             col.add(
                 ids=[f"{name}_{i}_{uuid.uuid4().hex[:6]}"],
                 embeddings=[emb],
@@ -110,6 +116,7 @@ print(f"[config] Image model: {IMAGE_MODEL} (via Pollinations)")
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 
 def get_collection():
+    # Single collection used for all site/domain knowledge.
     return chroma_client.get_or_create_collection(
         name="site_knowledge",
         metadata={"hnsw:space": "cosine"}
@@ -118,6 +125,7 @@ def get_collection():
 
 # ── Embedding via Ollama ───────────────────────────────
 def embed(text: str) -> list:
+    # Uses local Ollama embedding endpoint; returns [] when unavailable.
     try:
         resp = http_requests.post(
             "http://localhost:11434/api/embeddings",
@@ -130,6 +138,7 @@ def embed(text: str) -> list:
 
 # ── Text chunking ──────────────────────────────────────
 def chunk_text(text: str, size: int = 400, overlap: int = 60) -> list:
+    # Sliding-window chunking with overlap to preserve local context across chunks.
     chunks, start = [], 0
     while start < len(text):
         chunks.append(text[start:start + size])
@@ -138,6 +147,7 @@ def chunk_text(text: str, size: int = 400, overlap: int = 60) -> list:
 
 # ── RAG retrieval ──────────────────────────────────────
 def retrieve(query: str, n: int = 3) -> str:
+    # Semantic search in ChromaDB; returns formatted source-tagged snippets.
     col = get_collection()
     count = col.count()
     if count == 0:
@@ -154,6 +164,7 @@ def retrieve(query: str, n: int = 3) -> str:
     return "\n\n---\n\n".join(parts)
 
 # ── Domain & session state ─────────────────────────────
+# In-memory runtime state (resets on process restart).
 domain_contexts = {}
 pending_streams = {}
 generated_images = {}
@@ -195,6 +206,7 @@ def retrieve_design_trend(profile: dict) -> str:
     return "\n".join(docs) if docs else ""
 
 def default_profile():
+    # Fallback profile used when session has not been customized yet.
     return {"reading_style": "detailed", "tone": "casual", "experience": "basics"}
 
 def profile_to_4ts(profile: dict) -> dict:
@@ -208,6 +220,7 @@ def profile_to_4ts(profile: dict) -> dict:
     }
 
 def parse_url(raw: str):
+    # Normalizes user input to a parseable URL and returns (domain, path, full_url).
     raw = raw.strip()
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw
@@ -235,6 +248,7 @@ def build_image_urls(domain: str, path: str, count: int = 3) -> list:
     return urls
 
 def resolve_image_token(token: str):
+    # Resolve a temporary token to image bytes, with retry/fallback URL variants.
     cached = generated_image_cache.get(token)
     if cached:
         return cached
@@ -283,6 +297,7 @@ def resolve_image_token(token: str):
         "Accept": "image/*,*/*;q=0.8",
         "Referer": "",
     }
+    # Try original and fallback variants (different seeds/model settings).
     for candidate in candidate_urls:
         for _ in range(2):
             try:
@@ -415,19 +430,23 @@ def build_messages(url: str, domain: str, path: str,
 
 @app.route("/")
 def index():
+    # Main UI page where users enter URLs and view generated output.
     return render_template("index.html")
 
 @app.route("/admin")
 def admin():
+    # Admin UI for RAG/document management.
     return render_template("admin.html")
 
 # ── Profile ────────────────────────────────────────────
 @app.route("/api/profile", methods=["GET"])
 def get_profile():
+    # Reads saved profile from Flask session.
     return jsonify(session.get("profile", None))
 
 @app.route("/api/profile", methods=["POST"])
 def set_profile():
+    # Validates incoming profile fields and persists normalized values.
     data = request.get_json(force=True)
     profile = {
         "reading_style": data.get("reading_style") if data.get("reading_style") in READING_STYLES    else "detailed",
@@ -439,6 +458,7 @@ def set_profile():
 
 @app.route("/api/image/<token>")
 def proxy_generated_image(token: str):
+    # Proxies generated images so frontend uses stable local URLs.
     resolved = resolve_image_token(token)
     if not resolved:
         if token not in generated_images:
@@ -454,11 +474,13 @@ def proxy_generated_image(token: str):
 # ── RAG management ─────────────────────────────────────
 @app.route("/rag/status")
 def rag_status():
+    # Health/status endpoint for current vector store state.
     col = get_collection()
     return jsonify({"count": col.count(), "embed_model": EMBED_MODEL})
 
 @app.route("/rag/list")
 def rag_list():
+    # Lists unique source names currently indexed in Chroma.
     col = get_collection()
     if col.count() == 0:
         return jsonify({"sources": [], "count": 0})
@@ -468,6 +490,7 @@ def rag_list():
 
 @app.route("/rag/upload", methods=["POST"])
 def rag_upload():
+    # Accepts either multipart file uploads or JSON text body content.
     col = get_collection()
 
     # File upload
@@ -511,11 +534,13 @@ def rag_upload():
 
 @app.route("/rag/clear", methods=["POST"])
 def rag_clear():
+    # Drops the collection; next access recreates it via get_collection().
     chroma_client.delete_collection("site_knowledge")
     return jsonify({"ok": True})
 
 @app.route("/rag/sync-drive", methods=["POST"])
 def rag_sync_drive():
+    # Pulls files from Drive folder and re-indexes them into Chroma.
     try:
         result = sync_from_drive()
         return jsonify(result)
@@ -525,6 +550,7 @@ def rag_sync_drive():
 # ── Page generation ────────────────────────────────────
 @app.route("/generate", methods=["POST"])
 def generate():
+    # Prepares a streaming generation job and returns a stream identifier.
     data    = request.get_json(force=True)
     raw_url = (data.get("url") or "").strip()
     if not raw_url:
@@ -557,11 +583,13 @@ def generate():
     )
 
     sid = str(uuid.uuid4())
+    # Store everything needed by /stream/<sid>, then let client connect to SSE.
     pending_streams[sid] = {"url": full_url, "domain": domain, "path": path, "messages": messages, "image_urls": image_urls}
     return jsonify({"stream_id": sid, "url": full_url, "debug_prompt": debug_prompt})
 
 @app.route("/stream/<sid>")
 def stream_page(sid: str):
+    # Streams incremental model output as server-sent events.
     if sid not in pending_streams:
         return jsonify({"error": "Invalid stream ID"}), 404
 
@@ -572,6 +600,10 @@ def stream_page(sid: str):
     image_urls = info.get("image_urls", [])
 
     def generate_sse():
+        # Stream parser state:
+        # - accumulated: final full HTML buffer
+        # - fence_stripped: removes accidental markdown code fences once
+        # - buffer/in_think: handles partial chunks and strips <think> blocks
         accumulated    = []
         fence_stripped = False
         buffer         = ""
@@ -673,4 +705,5 @@ def stream_page(sid: str):
     )
 
 if __name__ == "__main__":
+    # Development server entrypoint.
     app.run(debug=True, threaded=True, port=5000)
