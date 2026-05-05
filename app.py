@@ -1,6 +1,7 @@
 import re
 import json
 import uuid
+import random
 import os
 import io
 import requests as http_requests
@@ -101,7 +102,7 @@ def sync_from_drive() -> dict:
 # ── Model config ───────────────────────────────────────
 MODEL       = "Ravishka/Miku"
 EMBED_MODEL = "embeddinggemma:latest"
-IMAGE_MODEL = "flux"
+IMAGE_MODEL = "gptimage"
 
 print(f"[config] Ollama — model: {MODEL}")
 print(f"[config] Image model: {IMAGE_MODEL} (via Pollinations)")
@@ -224,10 +225,11 @@ def build_image_urls(domain: str, path: str, count: int = 3) -> list:
     base_prompt = f"high quality website hero photo for {slug}, professional lighting, modern style"
     urls = []
     for i in range(1, count + 1):
+        seed = 1
         prompt = http_requests.utils.quote(f"{base_prompt}, variation {i}")
         remote_url = (
             "https://image.pollinations.ai/prompt/"
-            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={i}"
+            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={seed}"
         )
         token = uuid.uuid4().hex
         generated_images[token] = {"url": remote_url}
