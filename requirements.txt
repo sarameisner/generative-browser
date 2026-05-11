@@ -5,3 +5,5 @@ pypdf
 requests
 google-api-python-client
 google-auth
+huggingface_hub
+pillow

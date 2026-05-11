@@ -5,6 +5,8 @@ import random
 import os
 import io
 import requests as http_requests
+from huggingface_hub import InferenceClient
+from PIL import Image
 from typing import Optional
 from urllib.parse import urlparse, urlsplit, urlunsplit, parse_qsl, urlencode
 from flask import Flask, request, jsonify, Response, render_template, stream_with_context, session
@@ -105,7 +107,7 @@ EMBED_MODEL = "embeddinggemma:latest"
 IMAGE_MODEL = "flux"
 
 print(f"[config] Ollama — model: {MODEL}")
-print(f"[config] Image model: {IMAGE_MODEL} (via Pollinations)")
+print(f"[config] Image model: black-forest-labs/FLUX.1-dev (via Hugging Face / fal-ai)")
 
 # ── ChromaDB (persistent) ──────────────────────────────
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -159,6 +161,18 @@ domain_contexts = {}
 pending_streams = {}
 generated_images = {}
 generated_image_cache = {}
+
+_hf_client = None
+
+def get_hf_client() -> InferenceClient:
+    global _hf_client
+    if _hf_client is not None:
+        return _hf_client
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        raise RuntimeError("Missing HF_TOKEN env var")
+    _hf_client = InferenceClient(provider="fal-ai", api_key=token)
+    return _hf_client
 
 # ── Profile helpers ────────────────────────────────────
 READING_STYLES = {
@@ -225,13 +239,8 @@ def build_image_urls(domain: str, path: str, count: int = 3) -> list:
     base_prompt = f"high quality website hero photo for {slug}, professional lighting, modern style"
     urls = []
     for i in range(1, count + 1):
-        prompt = http_requests.utils.quote(f"{base_prompt}, variation {i}")
-        remote_url = (
-            "https://image.pollinations.ai/prompt/"
-            f"{prompt}?model={IMAGE_MODEL}&width=1280&height=720&nologo=true&seed={random.randint(1, 10)}"
-        )
         token = uuid.uuid4().hex
-        generated_images[token] = {"url": remote_url}
+        generated_images[token] = {"prompt": f"{base_prompt}, variation {i}"}
         urls.append(f"/api/image/{token}")
     return urls
 
@@ -243,59 +252,23 @@ def resolve_image_token(token: str):
     entry = generated_images.get(token)
     if not entry:
         return None
-    if isinstance(entry, dict):
-        remote_url = entry.get("url", "")
-    else:
-        # Backward compatibility for any old in-memory values.
-        remote_url = entry
-    if not remote_url:
+    prompt = entry.get("prompt", "") if isinstance(entry, dict) else ""
+    if not prompt:
         return None
 
-    parsed = urlsplit(remote_url)
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    candidate_urls = [remote_url]
-    seed_raw = query.get("seed", "1")
     try:
-        seed = int(seed_raw)
-    except ValueError:
-        seed = 1
-    for bump in (31, 97, 173):
-        q_variant = dict(query)
-        q_variant["seed"] = str(seed + bump)
-        candidate_urls.append(
-            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
-        )
-    # Same prompt, provider default model fallback.
-    q_no_model = dict(query)
-    q_no_model.pop("model", None)
-    if q_no_model != query:
-        candidate_urls.append(
-            urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_no_model), parsed.fragment))
-        )
-        for bump in (31, 97):
-            q_variant = dict(q_no_model)
-            q_variant["seed"] = str(seed + bump)
-            candidate_urls.append(
-                urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(q_variant), parsed.fragment))
-            )
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "image/*,*/*;q=0.8",
-        "Referer": "",
-    }
-    for candidate in candidate_urls:
-        for _ in range(2):
-            try:
-                resp = http_requests.get(candidate, timeout=35, headers=headers)
-                if resp.status_code != 200 or not resp.content:
-                    continue
-                content_type = resp.headers.get("Content-Type", "image/jpeg")
-                generated_image_cache[token] = (resp.content, content_type)
-                return generated_image_cache[token]
-            except Exception:
-                continue
-    return None
+        client = get_hf_client()
+        image = client.text_to_image(prompt, model="black-forest-labs/FLUX.1-dev")
+        if not isinstance(image, Image.Image):
+            return None
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        body = buf.getvalue()
+        generated_image_cache[token] = (body, "image/png")
+        return generated_image_cache[token]
+    except Exception as e:
+        print(f"[image] generation failed: {e}")
+        return None
 
 # ── Prompt builder (4T's structure) ───────────────────
 def build_messages(url: str, domain: str, path: str,
