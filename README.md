@@ -82,7 +82,7 @@ cd generative-browser
 
 # 3. Install Python dependencies
 # Installs: flask, ollama, chromadb, pypdf, requests, google-api-python-client, google-auth
-pip intall -r requriments.txt
+pip install -r requirements.txt
 
 # 4. Make sure Ollama is running
 ollama serve
@@ -94,7 +94,7 @@ ollama serve
 ## Running the app
 
 ```bash
-python3 app.py
+python app.py
 ```
 
 Open your browser and go to: **http://localhost:5000**
@@ -126,7 +126,7 @@ The shared Google Drive folder (`RAG_generative-browser`) currently contains two
 - `user_profiles.txt`
 - `web_design_trends_rag.md`
 
-To add more knowledge: add a `.txt` or `.md` file to the Drive folder, then sync from the admin panel.
+To add more knowledge: add a `.txt`, `.md`, or `.pdf` file to the Drive folder, then sync from the admin panel.
 
 **Example:** Add a text file describing a fictional flower shop to the Drive folder. Sync from the admin panel. Visit `luna-blomster.dk` — the generated page will include your specific products, prices, and details instead of generic AI content.
 
@@ -147,7 +147,7 @@ User enters URL
       ▼
 Flask /generate
   ├── Reads user profile from session
-  ├── Retrieves desing trend via RAG (ChromaDB)
+  ├── Retrieves relevant RAG chunks via ChromaDB
   ├── Builds 4T-structured prompt
   └── Returns stream-ID
       │
@@ -196,7 +196,7 @@ Every prompt is built around the 4T's framework:
 |---|-------------|--------|
 | **Traits** | Expert web designer, front-end developer, and copywriter - outputs only raw HTML, no markdown or commentary | Hardcoded in system prompt |
 | **Task** | Generate a complete, domain-appropriate HTML page for the given URL - includes structure rules, image URL, internal link limits, and brand identity from domain memory | URL + RAG chunks + domain memory + image proxy URL |
-| **Tone** | How content should read — maps to a named writing voice (casual, professinal, playful, dry) | User profile selection (tone field) |
+| **Tone** | How content should read — maps to a named writing voice (casual, professional, playful, dry) | User profile selection (tone field) |
 | **Target** | Who the content is written for — experience level and reading style | User profile selection (via profile_to_4ts()) |
 
 A fifth block, `[DESIGN]`, is injected alongside the 4T's. It is not a content instruction — it passes the RAG-retrieved design trend as visual and aesthetic direction only (CSS, layout, mood), explicitly instructing the model not to write *about* design concepts.
