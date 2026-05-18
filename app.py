@@ -207,6 +207,22 @@ def profile_to_4ts(profile: dict) -> dict:
         ).strip(),
         "target": EXPERIENCE_LEVELS.get(profile.get("experience", "basics"), ""),
     }
+def retrieve_profile_description(profile: dict) -> str:
+    """Hent den mest relevante profilbeskrivelse fra ChromaDB baseret på brugerens valg."""
+    query = (
+        f"{profile.get('tone', 'casual')} "
+        f"{profile.get('reading_style', 'detailed')} "
+        f"{profile.get('experience', 'basics')} user profile"
+    )
+    col = get_collection()
+    if col.count() == 0:
+        return ""
+    emb = embed(query)
+    if not emb:
+        return ""
+    results = col.query(query_embeddings=[emb], n_results=2)
+    docs = results["documents"][0]
+    return "\n".join(docs) if docs else ""
 
 def parse_url(raw: str):
     raw = raw.strip()
@@ -311,6 +327,7 @@ def build_messages(url: str, domain: str, path: str,
     """
 
     ts = profile_to_4ts(profile)
+    profile_description = retrieve_profile_description(profile)
 
     # ── TRAITS ────────────────────────────────────────
     traits = (
@@ -400,6 +417,7 @@ def build_messages(url: str, domain: str, path: str,
         f"[PERSONALITY]\n{personality}\n\n"
         f"[TONE]\n{tone}\n\n"
         f"[TARGET]\n{target}\n\n"
+        f"[PROFILE]\n{profile_description}\n\n"
         f"[DESIGN]\n{design_block}"
     )
 
