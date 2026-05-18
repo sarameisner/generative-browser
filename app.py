@@ -100,7 +100,7 @@ def sync_from_drive() -> dict:
     return {"ok": True, "files_synced": len(synced), "chunks_added": added_total, "details": synced}
 
 # ── Model config ───────────────────────────────────────
-MODEL       = "Ravishka/Miku"
+MODEL       = "qwen3:1.7b"
 EMBED_MODEL = "embeddinggemma:latest"
 IMAGE_MODEL = "flux"
 
